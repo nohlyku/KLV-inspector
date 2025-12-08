@@ -26,6 +26,8 @@ class KLVInspector(QMainWindow):
         self.current_file = None
         self.klv_parser = KLVParser()
         self.parsed_packets = []
+        self.search_results = []
+        self.search_index = 0
         self.init_ui()
         
         # Enable drag and drop
@@ -192,8 +194,8 @@ class KLVInspector(QMainWindow):
         
         # Metadata Table Tab
         self.metadata_table = QTableWidget()
-        self.metadata_table.setColumnCount(3)
-        self.metadata_table.setHorizontalHeaderLabels(['Tag', 'Name', 'Value'])
+        self.metadata_table.setColumnCount(4)
+        self.metadata_table.setHorizontalHeaderLabels(['KLV Tag', 'Name', 'KLV Value', 'Converted Value'])
         self.tab_widget.addTab(self.metadata_table, "Metadata")
         
         # Statistics Tab
@@ -455,8 +457,12 @@ class KLVInspector(QMainWindow):
             import traceback
             traceback.print_exc()
             
-    def update_metadata_table(self):
-        """Update metadata table with parsed data"""
+    def update_metadata_table(self, packet_idx=None):
+        """Update metadata table with parsed data
+        
+        Args:
+            packet_idx: If provided, only show metadata from this packet index
+        """
         self.metadata_table.setRowCount(0)
         self.metadata_table.setUpdatesEnabled(False)
         
@@ -464,35 +470,55 @@ class KLVInspector(QMainWindow):
         max_rows = 1000  # Limit to prevent UI freeze
         
         try:
-            for packet_idx, packet in enumerate(self.parsed_packets):
-                if row_count >= max_rows:
-                    break
-                    
-                # Process events periodically
-                if packet_idx % 10 == 0:
-                    QApplication.processEvents()
-                
-                if 'metadata' in packet:
-                    for key, value in packet['metadata'].items():
-                        if row_count >= max_rows:
-                            break
+            # If specific packet selected, only show that packet's metadata
+            if packet_idx is not None:
+                if packet_idx < len(self.parsed_packets):
+                    packet = self.parsed_packets[packet_idx]
+                    if 'metadata' in packet:
+                        for key, value in packet['metadata'].items():
+                            row = self.metadata_table.rowCount()
+                            self.metadata_table.insertRow(row)
                             
-                        row = self.metadata_table.rowCount()
-                        self.metadata_table.insertRow(row)
+                            self.metadata_table.setItem(row, 0, QTableWidgetItem(str(key)))
+                            self.metadata_table.setItem(row, 1, QTableWidgetItem(value.get('name', 'Unknown')))
+                            raw_decimal = str(value.get('raw_decimal', 'N/A'))
+                            self.metadata_table.setItem(row, 2, QTableWidgetItem(raw_decimal))
+                            val_str = str(value.get('value', 'N/A'))[:200]  # Limit length
+                            self.metadata_table.setItem(row, 3, QTableWidgetItem(val_str))
+            else:
+                # Show all packets' metadata
+                for pkt_idx, packet in enumerate(self.parsed_packets):
+                    if row_count >= max_rows:
+                        break
                         
-                        self.metadata_table.setItem(row, 0, QTableWidgetItem(str(key)))
-                        self.metadata_table.setItem(row, 1, QTableWidgetItem(value.get('name', 'Unknown')))
-                        val_str = str(value.get('value', 'N/A'))[:200]  # Limit length
-                        self.metadata_table.setItem(row, 2, QTableWidgetItem(val_str))
-                        row_count += 1
-            
-            if row_count >= max_rows:
-                # Add a note that table was truncated
-                row = self.metadata_table.rowCount()
-                self.metadata_table.insertRow(row)
-                self.metadata_table.setItem(row, 0, QTableWidgetItem("..."))
-                self.metadata_table.setItem(row, 1, QTableWidgetItem("[Table truncated]"))
-                self.metadata_table.setItem(row, 2, QTableWidgetItem(f"Showing first {max_rows} items"))
+                    # Process events periodically
+                    if pkt_idx % 10 == 0:
+                        QApplication.processEvents()
+                    
+                    if 'metadata' in packet:
+                        for key, value in packet['metadata'].items():
+                            if row_count >= max_rows:
+                                break
+                                
+                            row = self.metadata_table.rowCount()
+                            self.metadata_table.insertRow(row)
+                            
+                            self.metadata_table.setItem(row, 0, QTableWidgetItem(str(key)))
+                            self.metadata_table.setItem(row, 1, QTableWidgetItem(value.get('name', 'Unknown')))
+                            raw_decimal = str(value.get('raw_decimal', 'N/A'))
+                            self.metadata_table.setItem(row, 2, QTableWidgetItem(raw_decimal))
+                            val_str = str(value.get('value', 'N/A'))[:200]  # Limit length
+                            self.metadata_table.setItem(row, 3, QTableWidgetItem(val_str))
+                            row_count += 1
+                
+                if row_count >= max_rows:
+                    # Add a note that table was truncated
+                    row = self.metadata_table.rowCount()
+                    self.metadata_table.insertRow(row)
+                    self.metadata_table.setItem(row, 0, QTableWidgetItem("..."))
+                    self.metadata_table.setItem(row, 1, QTableWidgetItem("[Table truncated]"))
+                    self.metadata_table.setItem(row, 2, QTableWidgetItem("..."))
+                    self.metadata_table.setItem(row, 3, QTableWidgetItem(f"Showing first {max_rows} items"))
             
             self.metadata_table.resizeColumnsToContents()
             
@@ -511,6 +537,8 @@ class KLVInspector(QMainWindow):
                         packet = self.parsed_packets[packet_idx]
                         details = self.format_item_details(packet)
                         self.details_text.setText(details)
+                        # Update metadata table to show only this packet's metadata
+                        self.update_metadata_table(packet_idx)
                             
                 elif data.get('type') == 'metadata':
                     packet_idx = data.get('packet_index')
@@ -521,6 +549,8 @@ class KLVInspector(QMainWindow):
                             meta = packet['metadata'][tag]
                             details = self.format_item_details(meta)
                             self.details_text.setText(details)
+                        # Keep showing the packet's metadata
+                        self.update_metadata_table(packet_idx)
             except Exception as e:
                 self.details_text.setText(f"Error displaying details: {str(e)}")
                 
@@ -542,29 +572,60 @@ class KLVInspector(QMainWindow):
         return "\n".join(details)
         
     def perform_search(self):
-        """Perform search across KLV data"""
-        search_term = self.search_input.text().strip()
-        if not search_term:
-            return
+        """Perform search across KLV data and navigate to next result"""
+        try:
+            search_term = self.search_input.text().strip()
+            if not search_term or not self.parsed_packets:
+                return
             
-        self.status_label.setText(f"Searching for '{search_term}'...")
-        results = []
-        
-        # Search through tree items
-        iterator = QTreeWidgetItemIterator(self.tree_widget)
-        while iterator.value():
-            item = iterator.value()
-            if search_term.lower() in item.text(0).lower() or \
-               search_term.lower() in item.text(1).lower():
-                results.append(item)
-            iterator += 1
-            
-        if results:
-            self.tree_widget.setCurrentItem(results[0])
-            self.tree_widget.scrollToItem(results[0])
-            self.status_label.setText(f"Found {len(results)} result(s)")
-        else:
-            self.status_label.setText("No results found")
+            # Check if this is a new search or continuing previous search
+            current_search = getattr(self, 'last_search_term', '')
+            if search_term != current_search:
+                # New search - reset results
+                self.status_label.setText(f"Searching for '{search_term}'...")
+                QApplication.processEvents()
+                
+                self.search_results = []
+                search_lower = search_term.lower()
+                
+                # Search through tree items
+                root = self.tree_widget.invisibleRootItem()
+                def search_recursive(parent_item):
+                    for i in range(parent_item.childCount()):
+                        child = parent_item.child(i)
+                        try:
+                            text0 = child.text(0) if child.text(0) else ""
+                            text1 = child.text(1) if child.text(1) else ""
+                            text2 = child.text(2) if child.text(2) else ""
+                            
+                            if search_lower in text0.lower() or \
+                               search_lower in text1.lower() or \
+                               search_lower in text2.lower():
+                                self.search_results.append(child)
+                        except Exception:
+                            pass
+                        
+                        # Search children recursively
+                        if child.childCount() > 0:
+                            search_recursive(child)
+                
+                search_recursive(root)
+                self.search_index = 0
+                self.last_search_term = search_term
+            else:
+                # Same search - go to next result
+                if self.search_results:
+                    self.search_index = (self.search_index + 1) % len(self.search_results)
+                
+            if self.search_results:
+                current_item = self.search_results[self.search_index]
+                self.tree_widget.setCurrentItem(current_item)
+                self.tree_widget.scrollToItem(current_item)
+                self.status_label.setText(f"Result {self.search_index + 1} of {len(self.search_results)}")
+            else:
+                self.status_label.setText("No results found")
+        except Exception as e:
+            self.status_label.setText(f"Search error: {str(e)}")
             
     def show_search(self):
         """Show search dialog"""

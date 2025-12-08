@@ -136,3 +136,4 @@ This creates test files with realistic telemetry data:
 
 - Python 3.8+
 - PyQt5
+
