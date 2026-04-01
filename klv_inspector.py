@@ -4,710 +4,674 @@ A professional tool for analyzing STANAG 4609 and KLV metadata
 """
 
 import sys
-from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
-                             QHBoxLayout, QSplitter, QTextEdit, QTreeWidget, 
-                             QTreeWidgetItem, QTableWidget, QTableWidgetItem,
-                             QMenuBar, QMenu, QAction, QFileDialog, QMessageBox,
-                             QStatusBar, QLabel, QTabWidget, QToolBar, QLineEdit,
-                             QPushButton, QDockWidget, QProgressBar)
-from PyQt5.QtCore import Qt, QThread, pyqtSignal, QTimer
-from PyQt5.QtGui import QFont, QIcon, QKeySequence
+import os
+import threading
+import queue
+import tkinter as tk
+from tkinter import ttk, filedialog, messagebox
 
 from klv_parser import KLVParser
 from statistics_panel import StatisticsPanel
-import os
+
+# ── Colour palette ──────────────────────────────────────────────────────────────
+BG       = '#2b2b2b'
+BG_DARK  = '#1e1e1e'
+BG_INPUT = '#3c3f41'
+FG       = '#d4d4d4'
+FG_DIM   = '#9d9d9d'
+BLUE     = '#094771'
+BLUE_HL  = '#007acc'
+BORDER   = '#3c3c3c'
+SEL_BG   = '#264f78'
 
 
-class KLVInspector(QMainWindow):
-    """Main application window for KLV Inspector"""
-    
-    def __init__(self):
-        super().__init__()
-        self.current_file = None
-        self.klv_parser = KLVParser()
-        self.parsed_packets = []
-        self.search_results = []
-        self.search_index = 0
-        self.init_ui()
-        
-        # Enable drag and drop
-        self.setAcceptDrops(True)
-        
-    def dragEnterEvent(self, event):
-        """Handle drag enter event"""
-        if event.mimeData().hasUrls():
-            event.accept()
-        else:
-            event.ignore()
-            
-    def dropEvent(self, event):
-        """Handle drop event"""
-        files = [u.toLocalFile() for u in event.mimeData().urls()]
-        if files:
-            # Load the first file
-            self.load_and_parse_file(files[0])
-        
-    def init_ui(self):
-        """Initialize the user interface"""
-        self.setWindowTitle("KLV Inspector - STANAG 4609 Analyzer")
-        self.setGeometry(100, 100, 1400, 900)
-        
-        # Create menu bar
-        self.create_menu_bar()
-        
-        # Create toolbar
-        self.create_toolbar()
-        
-        # Create main layout
-        self.create_main_layout()
-        
-        # Create status bar
-        self.create_status_bar()
-        
-        # Apply dark theme
-        self.apply_style()
-        
-    def create_menu_bar(self):
-        """Create application menu bar"""
-        menubar = self.menuBar()
-        
-        # File menu
-        file_menu = menubar.addMenu('&File')
-        
-        open_action = QAction('&Open File...', self)
-        open_action.setShortcut(QKeySequence.Open)
-        open_action.triggered.connect(self.open_file)
-        file_menu.addAction(open_action)
-        
-        file_menu.addSeparator()
-        
-        export_csv_action = QAction('Export to &CSV...', self)
-        export_csv_action.triggered.connect(lambda: self.export_data('csv'))
-        file_menu.addAction(export_csv_action)
-        
-        export_xml_action = QAction('Export to &XML...', self)
-        export_xml_action.triggered.connect(lambda: self.export_data('xml'))
-        file_menu.addAction(export_xml_action)
-        
-        export_bin_action = QAction('Export to &Binary...', self)
-        export_bin_action.triggered.connect(lambda: self.export_data('bin'))
-        file_menu.addAction(export_bin_action)
-        
-        file_menu.addSeparator()
-        
-        exit_action = QAction('E&xit', self)
-        exit_action.setShortcut(QKeySequence.Quit)
-        exit_action.triggered.connect(self.close)
-        file_menu.addAction(exit_action)
-        
-        # View menu
-        view_menu = menubar.addMenu('&View')
-        
-        refresh_action = QAction('&Refresh', self)
-        refresh_action.setShortcut('F5')
-        refresh_action.triggered.connect(self.refresh_view)
-        view_menu.addAction(refresh_action)
-        
-        view_menu.addSeparator()
-        
-        clear_action = QAction('&Clear All', self)
-        clear_action.triggered.connect(self.clear_all)
-        view_menu.addAction(clear_action)
-        
-        # Tools menu
-        tools_menu = menubar.addMenu('&Tools')
-        
-        search_action = QAction('&Search...', self)
-        search_action.setShortcut(QKeySequence.Find)
-        search_action.triggered.connect(self.show_search)
-        tools_menu.addAction(search_action)
-        
-        stats_action = QAction('Show S&tatistics', self)
-        stats_action.triggered.connect(self.show_statistics)
-        tools_menu.addAction(stats_action)
-        
-        # Help menu
-        help_menu = menubar.addMenu('&Help')
-        
-        about_action = QAction('&About', self)
-        about_action.triggered.connect(self.show_about)
-        help_menu.addAction(about_action)
-        
-    def create_toolbar(self):
-        """Create application toolbar"""
-        toolbar = QToolBar("Main Toolbar")
-        toolbar.setMovable(False)
-        self.addToolBar(toolbar)
-        
-        # Open file button
-        open_btn = QAction('Open', self)
-        open_btn.triggered.connect(self.open_file)
-        toolbar.addAction(open_btn)
-        
-        toolbar.addSeparator()
-        
-        # Export button
-        export_btn = QAction('Export', self)
-        export_btn.triggered.connect(lambda: self.export_data('csv'))
-        toolbar.addAction(export_btn)
-        
-        toolbar.addSeparator()
-        
-        # Search components
-        toolbar.addWidget(QLabel("  Search: "))
-        self.search_input = QLineEdit()
-        self.search_input.setPlaceholderText("Search KLV data...")
-        self.search_input.setMaximumWidth(300)
-        self.search_input.returnPressed.connect(self.perform_search)
-        toolbar.addWidget(self.search_input)
-        
-        search_btn = QAction('Find', self)
-        search_btn.triggered.connect(self.perform_search)
-        toolbar.addAction(search_btn)
-        
-    def create_main_layout(self):
-        """Create main application layout"""
-        central_widget = QWidget()
-        self.setCentralWidget(central_widget)
-        
-        main_layout = QVBoxLayout(central_widget)
-        
-        # Create splitter for resizable panels
-        splitter = QSplitter(Qt.Horizontal)
-        
-        # Left panel: KLV Tree View
-        self.tree_widget = QTreeWidget()
-        self.tree_widget.setHeaderLabels(['KLV Structure', 'Value', 'Type'])
-        self.tree_widget.setColumnWidth(0, 300)
-        self.tree_widget.setColumnWidth(1, 200)
-        self.tree_widget.itemClicked.connect(self.on_tree_item_clicked)
-        splitter.addWidget(self.tree_widget)
-        
-        # Right panel: Tabs for different views
-        self.tab_widget = QTabWidget()
-        
-        # Details Tab
-        self.details_text = QTextEdit()
-        self.details_text.setReadOnly(True)
-        self.details_text.setFont(QFont("Courier New", 10))
-        self.tab_widget.addTab(self.details_text, "Details")
-        
-        # Metadata Table Tab
-        self.metadata_table = QTableWidget()
-        self.metadata_table.setColumnCount(4)
-        self.metadata_table.setHorizontalHeaderLabels(['KLV Tag', 'Name', 'KLV Value', 'Converted Value'])
-        self.tab_widget.addTab(self.metadata_table, "Metadata")
-        
-        # Statistics Tab
-        self.stats_panel = StatisticsPanel()
-        self.tab_widget.addTab(self.stats_panel, "Statistics")
-        
-        splitter.addWidget(self.tab_widget)
-        splitter.setSizes([400, 1000])
-        
-        main_layout.addWidget(splitter)
-        
-    def create_status_bar(self):
-        """Create status bar"""
-        self.statusBar = QStatusBar()
-        self.setStatusBar(self.statusBar)
-        
-        self.status_label = QLabel("Ready")
-        self.statusBar.addWidget(self.status_label)
-        
-        self.file_label = QLabel("")
-        self.statusBar.addPermanentWidget(self.file_label)
-        
-        self.packet_label = QLabel("Packets: 0")
-        self.statusBar.addPermanentWidget(self.packet_label)
-        
-    def apply_style(self):
-        """Apply application styling"""
-        self.setStyleSheet("""
-            QMainWindow {
-                background-color: #2b2b2b;
-            }
-            QTreeWidget {
-                background-color: #1e1e1e;
-                color: #d4d4d4;
-                border: 1px solid #3c3c3c;
-                font-size: 11pt;
-            }
-            QTreeWidget::item:selected {
-                background-color: #094771;
-            }
-            QTreeWidget::item:hover {
-                background-color: #2a2d2e;
-            }
-            QTextEdit, QTableWidget {
-                background-color: #1e1e1e;
-                color: #d4d4d4;
-                border: 1px solid #3c3c3c;
-                font-size: 10pt;
-            }
-            QTabWidget::pane {
-                border: 1px solid #3c3c3c;
-                background-color: #2b2b2b;
-            }
-            QTabBar::tab {
-                background-color: #2b2b2b;
-                color: #d4d4d4;
-                padding: 8px 20px;
-                border: 1px solid #3c3c3c;
-            }
-            QTabBar::tab:selected {
-                background-color: #094771;
-            }
-            QMenuBar {
-                background-color: #2b2b2b;
-                color: #d4d4d4;
-            }
-            QMenuBar::item:selected {
-                background-color: #094771;
-            }
-            QMenu {
-                background-color: #2b2b2b;
-                color: #d4d4d4;
-                border: 1px solid #3c3c3c;
-            }
-            QMenu::item:selected {
-                background-color: #094771;
-            }
-            QToolBar {
-                background-color: #2b2b2b;
-                border-bottom: 1px solid #3c3c3c;
-                spacing: 5px;
-                padding: 5px;
-            }
-            QLineEdit {
-                background-color: #1e1e1e;
-                color: #d4d4d4;
-                border: 1px solid #3c3c3c;
-                padding: 5px;
-                border-radius: 3px;
-            }
-            QStatusBar {
-                background-color: #007acc;
-                color: white;
-            }
-            QLabel {
-                color: #d4d4d4;
-            }
-        """)
-        
-    def open_file(self):
-        """Open and parse a KLV file"""
-        file_path, _ = QFileDialog.getOpenFileName(
-            self,
-            "Open KLV File",
-            "",
-            "All Files (*.*);;TS Files (*.ts);;Binary Files (*.bin);;KLV Files (*.klv)"
-        )
-        
-        if file_path:
-            self.current_file = file_path
-            self.load_and_parse_file(file_path)
-            
-    def load_and_parse_file(self, file_path):
-        """Load and parse KLV data from file"""
+class ParseWorker(threading.Thread):
+    """Background thread for parsing KLV data."""
+
+    def __init__(self, parser, data, on_finish, on_error, on_progress):
+        super().__init__(daemon=True)
+        self.parser      = parser
+        self.data        = data
+        self.on_finish   = on_finish    # callable(packets)
+        self.on_error    = on_error     # callable(msg)
+        self.on_progress = on_progress  # callable(pct)
+
+    def run(self):
         try:
-            self.status_label.setText(f"Loading {os.path.basename(file_path)}...")
-            QApplication.processEvents()
-            
-            # Read file
-            with open(file_path, 'rb') as f:
-                data = f.read()
-            
-            # Check file size
-            file_size_mb = len(data) / (1024 * 1024)
-            if file_size_mb > 100:
-                reply = QMessageBox.question(
-                    self,
-                    "Large File",
-                    f"This file is {file_size_mb:.1f} MB. Parsing may take a while. Continue?",
-                    QMessageBox.Yes | QMessageBox.No
-                )
-                if reply == QMessageBox.No:
-                    self.status_label.setText("Load cancelled")
-                    return
-            
-            self.status_label.setText(f"Parsing KLV data... 0%")
-            QApplication.processEvents()
-            
-            # Parse KLV data with progress callback
-            def update_progress(percent):
-                self.status_label.setText(f"Parsing KLV data... {percent}%")
-                QApplication.processEvents()
-            
-            self.parsed_packets = self.klv_parser.parse(data, progress_callback=update_progress)
-            
-            # Check if any packets were found
-            if not self.parsed_packets:
-                QMessageBox.warning(
-                    self,
-                    "No KLV Data Found",
-                    f"No valid KLV packets were found in this file.\n\n"
-                    f"The file may:\n"
-                    f"• Not contain STANAG 4609 / MISB 0601 data\n"
-                    f"• Use a different KLV format\n"
-                    f"• Be corrupted or incomplete\n\n"
-                    f"File size: {file_size_mb:.2f} MB"
-                )
-                self.status_label.setText("No KLV packets found")
-                return
-            
-            # Update displays
-            try:
-                self.status_label.setText(f"Updating tree view ({len(self.parsed_packets)} packets)...")
-                QApplication.processEvents()
-                self.populate_tree_view()
-                self.status_label.setText("Tree view complete")
-                QApplication.processEvents()
-            except Exception as e:
-                print(f"Error in tree view: {e}")
-                import traceback
-                traceback.print_exc()
-            
-            try:
-                self.status_label.setText("Updating metadata table...")
-                QApplication.processEvents()
-                self.update_metadata_table()
-                self.status_label.setText("Metadata table complete")
-                QApplication.processEvents()
-            except Exception as e:
-                print(f"Error in metadata table: {e}")
-                import traceback
-                traceback.print_exc()
-            
-            try:
-                self.status_label.setText("Calculating statistics...")
-                QApplication.processEvents()
-                self.stats_panel.update_statistics(self.parsed_packets)
-                self.status_label.setText("Statistics complete")
-                QApplication.processEvents()
-            except Exception as e:
-                print(f"Error in statistics: {e}")
-                import traceback
-                traceback.print_exc()
-            
-            # Update status
-            self.file_label.setText(f"File: {os.path.basename(file_path)}")
-            self.packet_label.setText(f"Packets: {len(self.parsed_packets)}")
-            self.status_label.setText(f"File loaded successfully - {len(self.parsed_packets)} packet(s) found")
-            
-        except MemoryError:
-            QMessageBox.critical(
-                self,
-                "Memory Error",
-                f"File is too large to load into memory.\n"
-                f"Try using a smaller file or use stream-based analysis."
-            )
-            self.status_label.setText("Memory error")
-        except Exception as e:
-            QMessageBox.critical(self, "Error", f"Failed to load file:\n{str(e)}")
-            self.status_label.setText("Error loading file")
-            
-    def populate_tree_view(self):
-        """Populate tree view with parsed KLV packets"""
-        self.tree_widget.clear()
-        
+            packets = self.parser.parse(self.data, progress_callback=self.on_progress)
+            self.on_finish(packets)
+        except Exception as exc:
+            self.on_error(str(exc))
+
+
+class KLVInspector:
+    """Main application controller / window."""
+
+    def __init__(self, root: tk.Tk):
+        self.root = root
+        self.root.title("KLV Inspector - STANAG 4609 / MISB 0601 Analysis Tool")
+        self.root.geometry("1400x900")
+        self.root.configure(bg=BG)
+
+        self.klv_parser      = KLVParser()
+        self.parsed_packets  = []
+        self.current_file    = None
+        self._tree_data      = {}   # iid -> dict with type/index info
+        self._search_results = []
+        self._search_index   = 0
+        self._parse_queue    = queue.Queue()
+
+        self._apply_style()
+        self._create_menu()
+        self._create_toolbar()
+        self._create_main_layout()
+        self._create_status_bar()
+
+        # Keyboard shortcuts
+        self.root.bind('<Control-o>', lambda _: self.open_file())
+        self.root.bind('<Control-f>', lambda _: self._focus_search())
+        self.root.bind('<Escape>',    lambda _: self._close_search())
+
+    # ── Style ──────────────────────────────────────────────────────────────────
+
+    def _apply_style(self):
+        s = ttk.Style(self.root)
+        s.theme_use('clam')
+
+        s.configure('.',
+                     background=BG, foreground=FG,
+                     fieldbackground=BG_INPUT,
+                     troughcolor=BG_DARK, bordercolor=BORDER,
+                     focuscolor=BLUE_HL,
+                     selectbackground=SEL_BG, selectforeground=FG,
+                     font=('Segoe UI', 9))
+
+        s.configure('TFrame',   background=BG)
+        s.configure('TLabel',   background=BG, foreground=FG)
+
+        s.configure('TButton',
+                     background='#3c3c3c', foreground='#ffffff',
+                     bordercolor=BORDER, focusthickness=1,
+                     padding=(8, 4),
+                     font=('Segoe UI', 9, 'bold'))
+        s.map('TButton',
+              background=[('active', BLUE_HL), ('pressed', BLUE)],
+              foreground=[('active', '#ffffff')])
+
+        s.configure('TMenubutton',
+                     background='#3c3c3c', foreground='#ffffff',
+                     bordercolor=BORDER, padding=(8, 4),
+                     font=('Segoe UI', 9, 'bold'))
+        s.map('TMenubutton',
+              background=[('active', BLUE_HL)],
+              foreground=[('active', '#ffffff')])
+
+        s.configure('TEntry',
+                     fieldbackground=BG_INPUT, foreground=FG,
+                     insertcolor=FG, bordercolor=BORDER)
+
+        s.configure('TPanedwindow', background=BG)
+        s.configure('TNotebook',    background=BG, bordercolor=BORDER)
+        s.configure('TNotebook.Tab',
+                     background='#3c3c3c', foreground=FG, padding=(10, 4))
+        s.map('TNotebook.Tab',
+              background=[('selected', BLUE)],
+              foreground=[('selected', '#ffffff')])
+
+        s.configure('TSeparator',   background=BORDER)
+        s.configure('TScrollbar',   background=BORDER, troughcolor=BG_DARK,
+                     bordercolor=BG_DARK, arrowcolor=FG)
+
+        s.configure('Horizontal.TProgressbar',
+                     troughcolor=BG_DARK, background=BLUE_HL)
+
+        # Tree / table styles
+        for name, bg in (('Tree.Treeview',  BG_DARK),
+                          ('Table.Treeview', '#0d3a5c')):
+            s.configure(name,
+                         background=bg, fieldbackground=bg, foreground=FG,
+                         rowheight=22, bordercolor=BORDER, relief='flat')
+            s.configure(f'{name}.Heading',
+                         background=BG_DARK, foreground=FG,
+                         bordercolor=BORDER, relief='flat')
+            s.map(name,
+                  background=[('selected', BLUE_HL)],
+                  foreground=[('selected', '#ffffff')])
+
+    # ── Menu ───────────────────────────────────────────────────────────────────
+
+    def _create_menu(self):
+        menubar = tk.Menu(self.root,
+                          bg=BG_DARK, fg=FG,
+                          activebackground=BLUE_HL, activeforeground='#ffffff',
+                          borderwidth=0)
+
+        # File ---------------------------------------------------------------
+        file_menu = tk.Menu(menubar, tearoff=0,
+                            bg=BG_DARK, fg=FG,
+                            activebackground=BLUE_HL, activeforeground='#ffffff')
+        file_menu.add_command(label='Open…',     accelerator='Ctrl+O',
+                              command=self.open_file)
+        file_menu.add_separator()
+        file_menu.add_command(label='Export as CSV…',
+                              command=lambda: self.export_data('csv'))
+        file_menu.add_command(label='Export as XML…',
+                              command=lambda: self.export_data('xml'))
+        file_menu.add_command(label='Export as Binary…',
+                              command=lambda: self.export_data('binary'))
+        file_menu.add_separator()
+        file_menu.add_command(label='Exit', command=self.root.quit)
+        menubar.add_cascade(label='File', menu=file_menu)
+
+        # View ---------------------------------------------------------------
+        view_menu = tk.Menu(menubar, tearoff=0,
+                            bg=BG_DARK, fg=FG,
+                            activebackground=BLUE_HL, activeforeground='#ffffff')
+        view_menu.add_command(label='Refresh',   command=self.refresh_view)
+        view_menu.add_command(label='Clear All', command=self.clear_all)
+        menubar.add_cascade(label='View', menu=view_menu)
+
+        # Tools --------------------------------------------------------------
+        tools_menu = tk.Menu(menubar, tearoff=0,
+                             bg=BG_DARK, fg=FG,
+                             activebackground=BLUE_HL, activeforeground='#ffffff')
+        tools_menu.add_command(label='Find…', accelerator='Ctrl+F',
+                               command=self._focus_search)
+        tools_menu.add_command(label='Statistics',
+                               command=lambda: self.notebook.select(self.stats_tab))
+        menubar.add_cascade(label='Tools', menu=tools_menu)
+
+        # Help ---------------------------------------------------------------
+        help_menu = tk.Menu(menubar, tearoff=0,
+                            bg=BG_DARK, fg=FG,
+                            activebackground=BLUE_HL, activeforeground='#ffffff')
+        help_menu.add_command(label='About', command=self.show_about)
+        menubar.add_cascade(label='Help', menu=help_menu)
+
+        self.root.config(menu=menubar)
+
+    # ── Toolbar ────────────────────────────────────────────────────────────────
+
+    def _create_toolbar(self):
+        toolbar = ttk.Frame(self.root, relief='flat')
+        toolbar.pack(side='top', fill='x', padx=4, pady=2)
+
+        ttk.Button(toolbar, text='Open', command=self.open_file).pack(side='left', padx=2)
+
+        # Export drop-down
+        exp_btn  = ttk.Menubutton(toolbar, text='Export')
+        exp_menu = tk.Menu(exp_btn, tearoff=0,
+                           bg=BG_DARK, fg=FG,
+                           activebackground=BLUE_HL, activeforeground='#ffffff')
+        exp_menu.add_command(label='Export CSV…',
+                             command=lambda: self.export_data('csv'))
+        exp_menu.add_command(label='Export XML…',
+                             command=lambda: self.export_data('xml'))
+        exp_menu.add_command(label='Export Binary…',
+                             command=lambda: self.export_data('binary'))
+        exp_btn.configure(menu=exp_menu)
+        exp_btn.pack(side='left', padx=2)
+
+        ttk.Separator(toolbar, orient='vertical').pack(side='left', fill='y', padx=4)
+
+        ttk.Button(toolbar, text='Expand All',
+                   command=self._expand_all).pack(side='left', padx=2)
+        ttk.Button(toolbar, text='Collapse All',
+                   command=self._collapse_all).pack(side='left', padx=2)
+
+        ttk.Separator(toolbar, orient='vertical').pack(side='left', fill='y', padx=4)
+
+        # Search
+        self.search_var   = tk.StringVar()
+        self.search_entry = ttk.Entry(toolbar, textvariable=self.search_var, width=22)
+        self.search_entry.pack(side='left', padx=2)
+        self.search_entry.bind('<Return>', lambda _: self.perform_search())
+
+        ttk.Button(toolbar, text='Find',
+                   command=self.perform_search).pack(side='left', padx=2)
+
+        # Progress bar (hidden by default; revealed during parsing)
+        self.progress_var = tk.IntVar(value=0)
+        self.progress_bar = ttk.Progressbar(toolbar,
+                                             variable=self.progress_var,
+                                             maximum=100, length=150,
+                                             style='Horizontal.TProgressbar')
+
+    # ── Main layout ────────────────────────────────────────────────────────────
+
+    def _create_main_layout(self):
+        self.paned = ttk.PanedWindow(self.root, orient=tk.HORIZONTAL)
+        self.paned.pack(fill='both', expand=True, padx=4, pady=(0, 4))
+        paned = self.paned
+
+        # Left: tree ─────────────────────────────────────────────────────────
+        left_frame = ttk.Frame(paned)
+        paned.add(left_frame, weight=1)
+
+        ttk.Label(left_frame, text='KLV Structure').pack(anchor='w', padx=4)
+
+        tree_frame = ttk.Frame(left_frame)
+        tree_frame.pack(fill='both', expand=True)
+        tree_frame.rowconfigure(0, weight=1)
+        tree_frame.columnconfigure(0, weight=1)
+
+        self.tree = ttk.Treeview(tree_frame,
+                                  columns=('value', 'type'),
+                                  show='tree headings',
+                                  style='Tree.Treeview',
+                                  selectmode='browse')
+        self.tree.heading('#0',    text='KLV Structure')
+        self.tree.heading('value', text='Value')
+        self.tree.heading('type',  text='Type')
+        self.tree.column('#0',    width=300, stretch=True)
+        self.tree.column('value', width=180, stretch=True)
+        self.tree.column('type',  width=80,  stretch=False)
+
+        vsb_tree = ttk.Scrollbar(tree_frame, orient='vertical',
+                                  command=self.tree.yview)
+        hsb_tree = ttk.Scrollbar(tree_frame, orient='horizontal',
+                                  command=self.tree.xview)
+        self.tree.configure(yscrollcommand=vsb_tree.set,
+                            xscrollcommand=hsb_tree.set)
+
+        self.tree.grid(row=0, column=0, sticky='nsew')
+        vsb_tree.grid(row=0, column=1, sticky='ns')
+        hsb_tree.grid(row=1, column=0, sticky='ew')
+
+        self.tree.bind('<<TreeviewSelect>>', self._on_tree_select)
+
+        self.tree.tag_configure('packet',
+                                 background='#1e3a5f', foreground='#ffffff',
+                                 font=('Segoe UI', 9, 'bold'))
+        self.tree.tag_configure('metadata', background=BG_DARK)
+        self.tree.tag_configure('alt',      background='#252525')
+
+        # Right: notebook ─────────────────────────────────────────────────────
+        right_frame = ttk.Frame(paned)
+        paned.add(right_frame, weight=3)
+
+        self.notebook = ttk.Notebook(right_frame)
+        self.notebook.pack(fill='both', expand=True)
+
+        # Tab 1: Details
+        details_frame = ttk.Frame(self.notebook)
+        self.notebook.add(details_frame, text='Details')
+
+        self.details_text = tk.Text(details_frame,
+                                     state='disabled', wrap='word',
+                                     bg=BG_DARK, fg=FG,
+                                     insertbackground=FG,
+                                     selectbackground=SEL_BG,
+                                     selectforeground=FG,
+                                     font=('Courier New', 10),
+                                     relief='flat', borderwidth=0)
+        vsb_det = ttk.Scrollbar(details_frame, orient='vertical',
+                                 command=self.details_text.yview)
+        self.details_text.configure(yscrollcommand=vsb_det.set)
+        self.details_text.pack(side='left', fill='both', expand=True)
+        vsb_det.pack(side='right', fill='y')
+
+        # Tab 2: Metadata table
+        meta_frame = ttk.Frame(self.notebook)
+        self.notebook.add(meta_frame, text='Metadata')
+        meta_frame.rowconfigure(0, weight=1)
+        meta_frame.columnconfigure(0, weight=1)
+
+        meta_cols = ('tag', 'name', 'value', 'converted')
+        self.meta_table = ttk.Treeview(meta_frame,
+                                        columns=meta_cols,
+                                        show='headings',
+                                        style='Table.Treeview')
+        for col, hdr, w in (('tag',       'KLV Tag',         60),
+                             ('name',      'Name',           200),
+                             ('value',     'KLV Value',      200),
+                             ('converted', 'Converted Value', 200)):
+            self.meta_table.heading(col, text=hdr)
+            self.meta_table.column(col, width=w, anchor='w')
+
+        vsb_meta = ttk.Scrollbar(meta_frame, orient='vertical',
+                                  command=self.meta_table.yview)
+        hsb_meta = ttk.Scrollbar(meta_frame, orient='horizontal',
+                                  command=self.meta_table.xview)
+        self.meta_table.configure(yscrollcommand=vsb_meta.set,
+                                   xscrollcommand=hsb_meta.set)
+        self.meta_table.grid(row=0, column=0, sticky='nsew')
+        vsb_meta.grid(row=0, column=1, sticky='ns')
+        hsb_meta.grid(row=1, column=0, sticky='ew')
+
+        self.meta_table.tag_configure('even', background='#0d3a5c')
+        self.meta_table.tag_configure('odd',  background='#094771')
+
+        # Tab 3: Statistics
+        self.stats_tab = ttk.Frame(self.notebook)
+        self.notebook.add(self.stats_tab, text='Statistics')
+        self.stats_panel = StatisticsPanel(self.stats_tab)
+        self.stats_panel.pack(fill='both', expand=True)
+
+        # Set the sash position on the first layout pass, then stop listening
+        def _set_sash(event):
+            self.paned.unbind('<Configure>', _cid)
+            self.paned.sashpos(0, 400)
+        _cid = self.paned.bind('<Configure>', _set_sash)
+
+    # ── Status bar ─────────────────────────────────────────────────────────────
+
+    def _create_status_bar(self):
+        bar = ttk.Frame(self.root, relief='flat')
+        bar.pack(side='bottom', fill='x', padx=4, pady=(0, 2))
+
+        self.status_label = ttk.Label(bar, text='Ready', foreground=FG_DIM)
+        self.status_label.pack(side='left')
+
+        self.packet_label = ttk.Label(bar, text='', foreground=FG_DIM)
+        self.packet_label.pack(side='right', padx=(0, 8))
+
+        self.file_label = ttk.Label(bar, text='', foreground=FG_DIM)
+        self.file_label.pack(side='right', padx=(0, 16))
+
+    # ── Parse queue polling ────────────────────────────────────────────────────
+
+    def _poll_queue(self):
+        """Check the parse queue; reschedule itself until done."""
         try:
-            # Temporarily disable updates for performance
-            self.tree_widget.setUpdatesEnabled(False)
-            
-            for idx, packet in enumerate(self.parsed_packets):
-                # Process events every 10 packets to prevent freezing
-                if idx % 10 == 0:
-                    QApplication.processEvents()
-                
-                # Create packet node
-                packet_item = QTreeWidgetItem(self.tree_widget)
-                packet_item.setText(0, f"Packet {idx + 1}")
-                packet_item.setText(1, f"{packet.get('length', 0)} bytes")
-                packet_item.setText(2, "KLV Packet")
-                # Store only index, not the full packet data
-                packet_item.setData(0, Qt.UserRole, {'type': 'packet', 'index': idx})
-                
-                # Add metadata items
-                if 'metadata' in packet:
-                    for key, value in packet['metadata'].items():
-                        meta_item = QTreeWidgetItem(packet_item)
-                        meta_item.setText(0, str(key))
-                        # Safely convert value to string
-                        val_str = str(value.get('value', 'N/A'))[:100]  # Limit length
-                        meta_item.setText(1, val_str)
-                        meta_item.setText(2, value.get('type', 'Unknown'))
-                        # Store metadata reference
-                        meta_item.setData(0, Qt.UserRole, {
-                            'type': 'metadata',
-                            'packet_index': idx,
-                            'tag': key
-                        })
-                
-                # Only expand first 5 packets to avoid UI freeze
-                if idx < 5:
-                    packet_item.setExpanded(True)
-            
-            # Re-enable updates
-            self.tree_widget.setUpdatesEnabled(True)
-            
-        except Exception as e:
-            self.tree_widget.setUpdatesEnabled(True)
-            print(f"Error populating tree: {e}")
-            import traceback
-            traceback.print_exc()
-            
-    def update_metadata_table(self, packet_idx=None):
-        """Update metadata table with parsed data
-        
-        Args:
-            packet_idx: If provided, only show metadata from this packet index
-        """
-        self.metadata_table.setRowCount(0)
-        self.metadata_table.setUpdatesEnabled(False)
-        
-        row_count = 0
-        max_rows = 1000  # Limit to prevent UI freeze
-        
-        try:
-            # If specific packet selected, only show that packet's metadata
-            if packet_idx is not None:
-                if packet_idx < len(self.parsed_packets):
-                    packet = self.parsed_packets[packet_idx]
-                    if 'metadata' in packet:
-                        for key, value in packet['metadata'].items():
-                            row = self.metadata_table.rowCount()
-                            self.metadata_table.insertRow(row)
-                            
-                            self.metadata_table.setItem(row, 0, QTableWidgetItem(str(key)))
-                            self.metadata_table.setItem(row, 1, QTableWidgetItem(value.get('name', 'Unknown')))
-                            raw_decimal = str(value.get('raw_decimal', 'N/A'))
-                            self.metadata_table.setItem(row, 2, QTableWidgetItem(raw_decimal))
-                            val_str = str(value.get('value', 'N/A'))[:200]  # Limit length
-                            self.metadata_table.setItem(row, 3, QTableWidgetItem(val_str))
-            else:
-                # Show all packets' metadata
-                for pkt_idx, packet in enumerate(self.parsed_packets):
-                    if row_count >= max_rows:
-                        break
-                        
-                    # Process events periodically
-                    if pkt_idx % 10 == 0:
-                        QApplication.processEvents()
-                    
-                    if 'metadata' in packet:
-                        for key, value in packet['metadata'].items():
-                            if row_count >= max_rows:
-                                break
-                                
-                            row = self.metadata_table.rowCount()
-                            self.metadata_table.insertRow(row)
-                            
-                            self.metadata_table.setItem(row, 0, QTableWidgetItem(str(key)))
-                            self.metadata_table.setItem(row, 1, QTableWidgetItem(value.get('name', 'Unknown')))
-                            raw_decimal = str(value.get('raw_decimal', 'N/A'))
-                            self.metadata_table.setItem(row, 2, QTableWidgetItem(raw_decimal))
-                            val_str = str(value.get('value', 'N/A'))[:200]  # Limit length
-                            self.metadata_table.setItem(row, 3, QTableWidgetItem(val_str))
-                            row_count += 1
-                
-                if row_count >= max_rows:
-                    # Add a note that table was truncated
-                    row = self.metadata_table.rowCount()
-                    self.metadata_table.insertRow(row)
-                    self.metadata_table.setItem(row, 0, QTableWidgetItem("..."))
-                    self.metadata_table.setItem(row, 1, QTableWidgetItem("[Table truncated]"))
-                    self.metadata_table.setItem(row, 2, QTableWidgetItem("..."))
-                    self.metadata_table.setItem(row, 3, QTableWidgetItem(f"Showing first {max_rows} items"))
-            
-            self.metadata_table.resizeColumnsToContents()
-            
-        finally:
-            self.metadata_table.setUpdatesEnabled(True)
-        
-    def on_tree_item_clicked(self, item, column):
-        """Handle tree item click"""
-        data = item.data(0, Qt.UserRole)
-        if data:
-            try:
-                # Retrieve actual packet data based on stored index
-                if data.get('type') == 'packet':
-                    packet_idx = data.get('index')
-                    if packet_idx < len(self.parsed_packets):
-                        packet = self.parsed_packets[packet_idx]
-                        details = self.format_item_details(packet)
-                        self.details_text.setText(details)
-                        # Update metadata table to show only this packet's metadata
-                        self.update_metadata_table(packet_idx)
-                            
-                elif data.get('type') == 'metadata':
-                    packet_idx = data.get('packet_index')
-                    tag = data.get('tag')
-                    if packet_idx < len(self.parsed_packets):
-                        packet = self.parsed_packets[packet_idx]
-                        if 'metadata' in packet and tag in packet['metadata']:
-                            meta = packet['metadata'][tag]
-                            details = self.format_item_details(meta)
-                            self.details_text.setText(details)
-                        # Keep showing the packet's metadata
-                        self.update_metadata_table(packet_idx)
-            except Exception as e:
-                self.details_text.setText(f"Error displaying details: {str(e)}")
-                
-    def format_item_details(self, data):
-        """Format item details for display"""
-        details = []
-        for key, value in data.items():
-            # Limit display of binary data
-            if isinstance(value, bytes):
-                if len(value) > 100:
-                    val_str = f"<{len(value)} bytes> {value[:50].hex()}..."
-                else:
-                    val_str = value.hex()
-            elif isinstance(value, str) and len(value) > 500:
-                val_str = value[:500] + "..."
-            else:
-                val_str = str(value)
-            details.append(f"{key}: {val_str}")
-        return "\n".join(details)
-        
-    def perform_search(self):
-        """Perform search across KLV data and navigate to next result"""
-        try:
-            search_term = self.search_input.text().strip()
-            if not search_term or not self.parsed_packets:
-                return
-            
-            # Check if this is a new search or continuing previous search
-            current_search = getattr(self, 'last_search_term', '')
-            if search_term != current_search:
-                # New search - reset results
-                self.status_label.setText(f"Searching for '{search_term}'...")
-                QApplication.processEvents()
-                
-                self.search_results = []
-                search_lower = search_term.lower()
-                
-                # Search through tree items
-                root = self.tree_widget.invisibleRootItem()
-                def search_recursive(parent_item):
-                    for i in range(parent_item.childCount()):
-                        child = parent_item.child(i)
-                        try:
-                            text0 = child.text(0) if child.text(0) else ""
-                            text1 = child.text(1) if child.text(1) else ""
-                            text2 = child.text(2) if child.text(2) else ""
-                            
-                            if search_lower in text0.lower() or \
-                               search_lower in text1.lower() or \
-                               search_lower in text2.lower():
-                                self.search_results.append(child)
-                        except Exception:
-                            pass
-                        
-                        # Search children recursively
-                        if child.childCount() > 0:
-                            search_recursive(child)
-                
-                search_recursive(root)
-                self.search_index = 0
-                self.last_search_term = search_term
-            else:
-                # Same search - go to next result
-                if self.search_results:
-                    self.search_index = (self.search_index + 1) % len(self.search_results)
-                
-            if self.search_results:
-                current_item = self.search_results[self.search_index]
-                self.tree_widget.setCurrentItem(current_item)
-                self.tree_widget.scrollToItem(current_item)
-                self.status_label.setText(f"Result {self.search_index + 1} of {len(self.search_results)}")
-            else:
-                self.status_label.setText("No results found")
-        except Exception as e:
-            self.status_label.setText(f"Search error: {str(e)}")
-            
-    def show_search(self):
-        """Show search dialog"""
-        self.search_input.setFocus()
-        self.search_input.selectAll()
-        
-    def show_statistics(self):
-        """Switch to statistics tab"""
-        self.tab_widget.setCurrentWidget(self.stats_panel)
-        
-    def export_data(self, format_type):
-        """Export parsed data to file"""
-        if not self.parsed_packets:
-            QMessageBox.warning(self, "Warning", "No data to export")
+            msg_type, payload = self._parse_queue.get_nowait()
+        except queue.Empty:
+            self.root.after(100, self._poll_queue)
             return
-            
-        filters = {
-            'csv': "CSV Files (*.csv)",
-            'xml': "XML Files (*.xml)",
-            'bin': "Binary Files (*.bin)"
-        }
-        
-        file_path, _ = QFileDialog.getSaveFileName(
-            self,
-            f"Export to {format_type.upper()}",
-            "",
-            filters.get(format_type, "All Files (*.*)")
+
+        if msg_type == 'progress':
+            self.progress_var.set(payload)
+            self.root.after(100, self._poll_queue)
+        elif msg_type == 'finished':
+            self._on_parse_complete(payload)
+        elif msg_type == 'error':
+            self._on_parse_error(payload)
+
+    # ── File operations ────────────────────────────────────────────────────────
+
+    def open_file(self):
+        path = filedialog.askopenfilename(
+            title='Open KLV File',
+            filetypes=[
+                ('KLV / Transport Stream files',
+                 '*.ts *.klv *.bin *.mpg *.mpeg *.mp4 *.mxf'),
+                ('All files', '*.*'),
+            ])
+        if path:
+            self.load_and_parse_file(path)
+
+    def load_and_parse_file(self, file_path: str):
+        try:
+            size = os.path.getsize(file_path)
+            if size > 100 * 1024 * 1024:
+                ok = messagebox.askyesno(
+                    'Large File',
+                    f'File is {size / (1024 * 1024):.1f} MB. '
+                    'Parsing may take a while. Continue?')
+                if not ok:
+                    return
+            with open(file_path, 'rb') as fh:
+                data = fh.read()
+        except OSError as exc:
+            messagebox.showerror('Error', f'Could not open file:\n{exc}')
+            return
+
+        self.current_file = file_path
+        self.clear_all()
+        self.file_label.config(text=os.path.basename(file_path))
+        self.status_label.config(text='Parsing…')
+
+        # Show progress bar in toolbar
+        self.progress_bar.pack(side='right', padx=6)
+        self.progress_var.set(0)
+
+        def _finish(packets):
+            self._parse_queue.put(('finished', packets))
+
+        def _error(msg):
+            self._parse_queue.put(('error', msg))
+
+        def _progress(pct):
+            self._parse_queue.put(('progress', pct))
+
+        ParseWorker(self.klv_parser, data, _finish, _error, _progress).start()
+        self.root.after(100, self._poll_queue)
+
+    def _on_parse_complete(self, packets):
+        self.parsed_packets = packets
+        self.progress_bar.pack_forget()
+        self.populate_tree_view()
+        self.update_metadata_table()
+        self.stats_panel.update_statistics(packets)
+        self.status_label.config(text='Parsing complete')
+        self.packet_label.config(text=f'{len(packets)} packet(s)')
+
+    def _on_parse_error(self, error_msg: str):
+        self.progress_bar.pack_forget()
+        self.status_label.config(text='Parse error')
+        messagebox.showerror('Parse Error', f'Failed to parse file:\n{error_msg}')
+
+    # ── Tree view ──────────────────────────────────────────────────────────────
+
+    def populate_tree_view(self):
+        self.tree.delete(*self.tree.get_children())
+        self._tree_data.clear()
+
+        for idx, packet in enumerate(self.parsed_packets):
+            ts   = packet.get('timestamp', '')
+            size = packet.get('length', 0)
+            label = f'Packet {idx + 1}'
+            if ts:
+                label += f'  —  {ts}'
+
+            pkt_iid = self.tree.insert(
+                '', 'end',
+                text=label,
+                values=(f'{size} bytes', 'Packet'),
+                open=True,
+                tags=('packet',))
+            self._tree_data[pkt_iid] = {'type': 'packet', 'index': idx}
+
+            for tag, meta in packet.get('metadata', {}).items():
+                name  = meta.get('name', f'Tag {tag}')
+                value = str(meta.get('converted_value',
+                                     meta.get('raw_hex', '')))
+                if len(value) > 50:
+                    value = value[:47] + '…'
+                row_tag = 'metadata' if int(tag) % 2 == 0 else 'alt'
+                child_iid = self.tree.insert(
+                    pkt_iid, 'end',
+                    text=f'[{tag}] {name}',
+                    values=(value, meta.get('data_type', '')),
+                    tags=(row_tag,))
+                self._tree_data[child_iid] = {
+                    'type': 'metadata',
+                    'packet_index': idx,
+                    'tag': tag,
+                }
+
+    def _on_tree_select(self, _event=None):
+        sel = self.tree.selection()
+        if not sel:
+            return
+        iid  = sel[0]
+        data = self._tree_data.get(iid)
+        if data is None:
+            return
+
+        self._show_details(data)
+
+        if data['type'] == 'packet':
+            self.update_metadata_table(data['index'])
+        else:
+            self.update_metadata_table(data['packet_index'])
+
+    def _show_details(self, data: dict):
+        if data['type'] == 'packet':
+            packet = self.parsed_packets[data['index']]
+            lines  = [f'{k}: {v}'
+                      for k, v in packet.items() if k != 'metadata']
+        else:
+            packet = self.parsed_packets[data['packet_index']]
+            meta   = packet.get('metadata', {}).get(data['tag'], {})
+            lines  = []
+            for k, v in meta.items():
+                v_str = str(v)
+                if len(v_str) > 200:
+                    v_str = v_str[:200] + '…'
+                lines.append(f'{k}: {v_str}')
+
+        self.details_text.config(state='normal')
+        self.details_text.delete('1.0', 'end')
+        self.details_text.insert('1.0', '\n'.join(lines))
+        self.details_text.config(state='disabled')
+
+    # ── Metadata table ─────────────────────────────────────────────────────────
+
+    def update_metadata_table(self, packet_idx: int | None = None):
+        self.meta_table.delete(*self.meta_table.get_children())
+
+        packets = (
+            [self.parsed_packets[packet_idx]]
+            if packet_idx is not None and self.parsed_packets
+            else self.parsed_packets
         )
-        
-        if file_path:
-            try:
-                self.klv_parser.export(self.parsed_packets, file_path, format_type)
-                self.status_label.setText(f"Exported to {os.path.basename(file_path)}")
-                QMessageBox.information(self, "Success", "Data exported successfully")
-            except Exception as e:
-                QMessageBox.critical(self, "Error", f"Export failed:\n{str(e)}")
-                
+
+        row_num = 0
+        for packet in packets:
+            for tag, meta in packet.get('metadata', {}).items():
+                if row_num >= 1000:
+                    break
+                row_tag = 'even' if row_num % 2 == 0 else 'odd'
+                value   = str(meta.get('raw_hex',        ''))
+                conv    = str(meta.get('converted_value', ''))
+                if len(value) > 100:
+                    value = value[:97] + '…'
+                if len(conv)  > 100:
+                    conv  = conv[:97]  + '…'
+                self.meta_table.insert(
+                    '', 'end',
+                    values=(tag, meta.get('name', f'Tag {tag}'), value, conv),
+                    tags=(row_tag,))
+                row_num += 1
+
+    # ── Search ─────────────────────────────────────────────────────────────────
+
+    def _focus_search(self):
+        self.search_entry.focus_set()
+        self.search_entry.selection_range(0, 'end')
+
+    def _close_search(self):
+        self.search_var.set('')
+        self._search_results.clear()
+        self._search_index = 0
+
+    def perform_search(self):
+        query = self.search_var.get().strip().lower()
+        if not query:
+            return
+
+        hits = []
+        for iid in self.tree.get_children():
+            txt  = self.tree.item(iid, 'text').lower()
+            vals = ' '.join(str(v) for v in self.tree.item(iid, 'values')).lower()
+            if query in txt or query in vals:
+                hits.append(iid)
+            for child_iid in self.tree.get_children(iid):
+                ctxt  = self.tree.item(child_iid, 'text').lower()
+                cvals = ' '.join(
+                    str(v) for v in self.tree.item(child_iid, 'values')).lower()
+                if query in ctxt or query in cvals:
+                    hits.append(child_iid)
+
+        if not hits:
+            self.status_label.config(text='No results found')
+            return
+
+        # Cycle through hits on repeated searches
+        if hits == self._search_results:
+            self._search_index = (self._search_index + 1) % len(hits)
+        else:
+            self._search_results = hits
+            self._search_index   = 0
+
+        target = hits[self._search_index]
+        self.tree.selection_set(target)
+        self.tree.see(target)
+        self.status_label.config(
+            text=f'Result {self._search_index + 1} of {len(hits)}')
+
+    # ── Expand / collapse ──────────────────────────────────────────────────────
+
+    def _expand_all(self):
+        for iid in self.tree.get_children():
+            self.tree.item(iid, open=True)
+
+    def _collapse_all(self):
+        for iid in self.tree.get_children():
+            self.tree.item(iid, open=False)
+
+    # ── Export ─────────────────────────────────────────────────────────────────
+
+    def export_data(self, fmt: str):
+        if not self.parsed_packets:
+            messagebox.showwarning('Export', 'No data to export.')
+            return
+
+        ext_map  = {'csv': '.csv',  'xml': '.xml',  'binary': '.bin'}
+        type_map = {
+            'csv':    [('CSV files',    '*.csv')],
+            'xml':    [('XML files',    '*.xml')],
+            'binary': [('Binary files', '*.bin')],
+        }
+        path = filedialog.asksaveasfilename(
+            title=f'Export as {fmt.upper()}',
+            defaultextension=ext_map.get(fmt, ''),
+            filetypes=type_map.get(fmt, [('All files', '*.*')]))
+        if not path:
+            return
+
+        try:
+            self.klv_parser.export(self.parsed_packets, path, fmt)
+            self.status_label.config(
+                text=f'Exported to {os.path.basename(path)}')
+        except Exception as exc:
+            messagebox.showerror('Export Error', str(exc))
+
+    # ── View helpers ───────────────────────────────────────────────────────────
+
     def refresh_view(self):
-        """Refresh the current view"""
         if self.current_file:
             self.load_and_parse_file(self.current_file)
-            
+
     def clear_all(self):
-        """Clear all data"""
-        self.tree_widget.clear()
-        self.details_text.clear()
-        self.metadata_table.setRowCount(0)
-        self.stats_panel.clear()
         self.parsed_packets = []
-        self.current_file = None
-        self.file_label.setText("")
-        self.packet_label.setText("Packets: 0")
-        self.status_label.setText("Ready")
-        
+        self._tree_data.clear()
+        self.tree.delete(*self.tree.get_children())
+        self.meta_table.delete(*self.meta_table.get_children())
+        self.details_text.config(state='normal')
+        self.details_text.delete('1.0', 'end')
+        self.details_text.config(state='disabled')
+        self.stats_panel.clear()
+        self.status_label.config(text='Ready')
+        self.file_label.config(text='')
+        self.packet_label.config(text='')
+        self._search_results.clear()
+        self._search_index = 0
+
     def show_about(self):
-        """Show about dialog"""
-        QMessageBox.about(
-            self,
-            "About KLV Inspector",
-            "<h2>KLV Inspector</h2>"
-            "<p>Version 1.0</p>"
-            "<p>A professional tool for analyzing STANAG 4609 files and KLV metadata.</p>"
-            "<p>Supports MISB 0601.12 (UAS Datalink Local Metadata Set) and SMPTE 336M-2007.</p>"
-            "<p><b>Features:</b></p>"
-            "<ul>"
-            "<li>Deep KLV packet analysis</li>"
-            "<li>Hex viewer with binary/ASCII preview</li>"
-            "<li>Metadata export (CSV, XML, Binary)</li>"
-            "<li>Search and statistics</li>"
-            "</ul>"
-        )
+        messagebox.showinfo(
+            'About KLV Inspector',
+            'KLV Inspector v1.0\n\n'
+            'A professional tool for analyzing\n'
+            'STANAG 4609 and MISB 0601 KLV metadata.\n\n'
+            'Supports CSV, XML, and Binary export.')
 
 
 def main():
-    """Main application entry point"""
-    app = QApplication(sys.argv)
-    app.setApplicationName("KLV Inspector")
-    
-    window = KLVInspector()
-    window.show()
-    
-    sys.exit(app.exec_())
+    root = tk.Tk()
+    KLVInspector(root)
+    root.mainloop()
 
 
 if __name__ == '__main__':

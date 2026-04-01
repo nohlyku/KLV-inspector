@@ -5,6 +5,7 @@ Handles parsing of STANAG 4609 and MISB 0601 KLV metadata
 
 import struct
 from io import BytesIO
+from datetime import datetime, timezone
 import csv
 import xml.etree.ElementTree as ET
 from xml.dom import minidom
@@ -169,16 +170,124 @@ class KLVParser:
         148: {"name": "Reference Frame GTIN", "type": "uint64"},
     }
     
+    # Data-driven conversion specs: tag -> (method, *params)
+    # "map": offset + (raw / divisor) * scale, formatted with unit and decimals
+    # "direct": raw value with unit suffix
+    # "timestamp": microsecond UTC timestamp
+    # "hex": hex display
+    # "enum": enumeration lookup
+    TAG_CONVERSIONS = {
+        1: ("hex",),
+        2: ("timestamp",),
+        5: ("map", 0, 65535.0, 360.0, "°", 4),
+        6: ("map", 0, 32767.0, 20.0, "°", 4),
+        7: ("map", 0, 32767.0, 50.0, "°", 4),
+        8: ("direct", " m/s"),
+        9: ("direct", " m/s"),
+        13: ("map", 0, 2147483648.0, 90.0, "°", 6),
+        14: ("map", 0, 2147483648.0, 180.0, "°", 6),
+        15: ("map", -900.0, 65535.0, 19900.0, " m", 2),
+        16: ("map", 0, 65535.0, 180.0, "°", 4),
+        17: ("map", 0, 65535.0, 180.0, "°", 4),
+        18: ("map", 0, 4294967295.0, 360.0, "°", 4),
+        19: ("map", 0, 2147483647.0, 180.0, "°", 4),
+        20: ("map", 0, 4294967295.0, 360.0, "°", 4),
+        21: ("map", 0, 4294967295.0, 5000000.0, " m", 2),
+        22: ("map", 0, 65535.0, 10000.0, " m", 2),
+        23: ("map", 0, 2147483648.0, 90.0, "°", 6),
+        24: ("map", 0, 2147483648.0, 180.0, "°", 6),
+        25: ("map", -900.0, 65535.0, 19900.0, " m", 2),
+        26: ("map", 0, 32767.0, 0.075, "°", 6),
+        27: ("map", 0, 32767.0, 0.075, "°", 6),
+        28: ("map", 0, 32767.0, 0.075, "°", 6),
+        29: ("map", 0, 32767.0, 0.075, "°", 6),
+        30: ("map", 0, 32767.0, 0.075, "°", 6),
+        31: ("map", 0, 32767.0, 0.075, "°", 6),
+        32: ("map", 0, 32767.0, 0.075, "°", 6),
+        33: ("map", 0, 32767.0, 0.075, "°", 6),
+        34: ("enum", {1: "Detected", 0: "Not Detected"}),
+        35: ("map", 0, 65535.0, 360.0, "°", 2),
+        36: ("map", 0, 255.0, 100.0, " m/s", 2),
+        37: ("map", 0, 65535.0, 5000.0, " mbar", 2),
+        38: ("map", -900.0, 65535.0, 19900.0, " m", 2),
+        39: ("direct", "°C"),
+        40: ("map", 0, 2147483648.0, 90.0, "°", 6),
+        41: ("map", 0, 2147483648.0, 180.0, "°", 6),
+        42: ("map", -900.0, 65535.0, 19900.0, " m", 2),
+        43: ("direct", " pixels"),
+        44: ("direct", " pixels"),
+        45: ("map", 0, 65535.0, 4095.0, " m", 2),
+        46: ("map", 0, 65535.0, 4095.0, " m", 2),
+        47: ("hex",),
+        49: ("map", 0, 65535.0, 5000.0, " mbar", 2),
+        50: ("map", 0, 32767.0, 20.0, "°", 4),
+        51: ("map", 0, 32767.0, 180.0, " m/s", 2),
+        52: ("map", 0, 32767.0, 20.0, "°", 4),
+        53: ("map", 0, 65535.0, 5000.0, " mbar", 2),
+        54: ("map", -900.0, 65535.0, 19900.0, " m", 2),
+        55: ("map", 0, 255.0, 100.0, "%", 1),
+        56: ("direct", " m/s"),
+        57: ("map", 0, 4294967295.0, 5000000.0, " m", 2),
+        58: ("map", 0, 65535.0, 10000.0, " kg", 2),
+        64: ("map", 0, 65535.0, 360.0, "°", 4),
+        67: ("map", 0, 2147483648.0, 90.0, "°", 6),
+        68: ("map", 0, 2147483648.0, 180.0, "°", 6),
+        69: ("map", -900.0, 65535.0, 19900.0, " m", 2),
+        71: ("map", 0, 65535.0, 360.0, "°", 4),
+        72: ("timestamp",),
+        75: ("map", -900.0, 65535.0, 19900.0, " m", 2),
+        76: ("map", -900.0, 65535.0, 19900.0, " m", 2),
+        78: ("map", -900.0, 65535.0, 19900.0, " m", 2),
+        79: ("map", 0, 32767.0, 327.0, " m/s", 2),
+        80: ("map", 0, 32767.0, 327.0, " m/s", 2),
+        82: ("map", 0, 2147483648.0, 90.0, "°", 6),
+        83: ("map", 0, 2147483648.0, 180.0, "°", 6),
+        84: ("map", 0, 2147483648.0, 90.0, "°", 6),
+        85: ("map", 0, 2147483648.0, 180.0, "°", 6),
+        86: ("map", 0, 2147483648.0, 90.0, "°", 6),
+        87: ("map", 0, 2147483648.0, 180.0, "°", 6),
+        88: ("map", 0, 2147483648.0, 90.0, "°", 6),
+        89: ("map", 0, 2147483648.0, 180.0, "°", 6),
+        90: ("map", 0, 2147483647.0, 90.0, "°", 6),
+        91: ("map", 0, 2147483647.0, 90.0, "°", 6),
+        92: ("map", 0, 2147483647.0, 90.0, "°", 6),
+        93: ("map", 0, 2147483647.0, 90.0, "°", 6),
+        96: ("map", 0, 4294967295.0, 10000000.0, " m", 2),
+        103: ("map", -900.0, 4294967295.0, 40900.0, " m", 2),
+        104: ("map", -900.0, 4294967295.0, 40900.0, " m", 2),
+        105: ("map", -900.0, 4294967295.0, 40900.0, " m", 2),
+        109: ("map", 0, 4294967295.0, 21000.0, " m", 2),
+        110: ("direct", " s"),
+        111: ("direct", " RPM"),
+        112: ("map", 0, 4294967295.0, 360.0, "°", 4),
+        113: ("map", -900.0, 65535.0, 19900.0, " m", 2),
+        114: ("map", 0, 4294967295.0, 50000.0, " m", 2),
+        117: ("map", 0, 2147483647.0, 1000.0, "°/s", 4),
+        118: ("map", 0, 2147483647.0, 1000.0, "°/s", 4),
+        119: ("map", 0, 2147483647.0, 1000.0, "°/s", 4),
+        120: ("map", 0, 4294967295.0, 100.0, "%", 1),
+        131: ("timestamp",),
+        133: ("direct", " MB"),
+        134: ("map", 0, 4294967295.0, 100.0, "%", 1),
+        136: ("direct", " s"),
+        137: ("direct", " ns"),
+    }
+    
+    # Struct format and expected byte length for each type
+    _STRUCT_FORMATS = {
+        'uint8': ('>B', 1), 'uint16': ('>H', 2), 'uint32': ('>I', 4), 'uint64': ('>Q', 8),
+        'int8': ('>b', 1), 'int16': ('>h', 2), 'int32': ('>i', 4), 'int64': ('>q', 8),
+    }
+    
     def __init__(self):
         self.packets = []
-        self.max_scan_bytes = 100 * 1024 * 1024  # 100 MB max scan without finding packets
         
     def parse(self, data, progress_callback=None):
-        """Parse KLV data from binary buffer"""
+        """Parse KLV data from binary buffer using fast label scanning"""
         self.packets = []
-        stream = BytesIO(data)
         offset = 0
         data_len = len(data)
+        label = self.UAS_DATALINK_LS_UNIVERSAL_LABEL
         last_progress = 0
         
         try:
@@ -190,96 +299,64 @@ class KLVParser:
                         progress_callback(progress)
                         last_progress = progress
                 
-                # Try to find KLV packet
-                start_pos = stream.tell()
-                packet = self._find_and_parse_klv_packet(stream, offset, data_len)
-                if packet is None:
+                # Fast C-optimized search for next UAS label
+                pos = data.find(label, offset)
+                if pos < 0:
                     break
-                    
-                self.packets.append(packet)
-                offset = stream.tell()
                 
-                # Safety check: avoid infinite loops
-                if offset >= data_len:
+                # Read BER-encoded length directly from data
+                ber_offset = pos + 16
+                if ber_offset >= data_len:
                     break
+                
+                first = data[ber_offset]
+                if first & 0x80 == 0:
+                    length = first
+                    value_start = ber_offset + 1
+                else:
+                    num_bytes = first & 0x7F
+                    if num_bytes > 8 or ber_offset + 1 + num_bytes > data_len:
+                        offset = pos + 1
+                        continue
+                    length = int.from_bytes(data[ber_offset + 1:ber_offset + 1 + num_bytes], 'big')
+                    value_start = ber_offset + 1 + num_bytes
+                
+                # Sanity check on length (max 10MB per packet)
+                if length > 10 * 1024 * 1024 or length < 0:
+                    offset = pos + 1
+                    continue
+                
+                # Check if we have enough data
+                if value_start + length > data_len:
+                    offset = pos + 1
+                    continue
+                
+                value = data[value_start:value_start + length]
+                
+                # Parse the metadata
+                try:
+                    metadata = self._parse_metadata(value)
+                except Exception:
+                    offset = pos + 1
+                    continue
+                
+                self.packets.append({
+                    'offset': pos,
+                    'key': label.hex(),
+                    'length': length,
+                    'value': value,
+                    'value_offset': value_start,
+                    'metadata': metadata
+                })
+                
+                offset = value_start + length
         except Exception as e:
             print(f"Parse error at offset {offset}: {e}")
-            # Return what we've found so far
-            pass
         
         if progress_callback:
             progress_callback(100)
         
         return self.packets
-        
-    def _find_and_parse_klv_packet(self, stream, start_offset, data_len):
-        """Find and parse a single KLV packet"""
-        # Read until we find a potential KLV header
-        scan_start = stream.tell()
-        max_scan = min(scan_start + self.max_scan_bytes, data_len)
-        
-        while stream.tell() < max_scan:
-            pos = stream.tell()
-            
-            # Check if we're too close to end
-            if pos + 16 > data_len:
-                return None
-            
-            chunk = stream.read(16)
-            
-            if len(chunk) < 16:
-                return None
-                
-            # Check for UAS Datalink LS Universal Label
-            if chunk == self.UAS_DATALINK_LS_UNIVERSAL_LABEL:
-                # Found a packet, now read the length
-                length_data = self._read_ber_length(stream)
-                if length_data is None:
-                    stream.seek(pos + 1)
-                    continue
-                    
-                length = length_data
-                
-                # Sanity check on length (max 10MB per packet)
-                if length > 10 * 1024 * 1024 or length < 0:
-                    stream.seek(pos + 1)
-                    continue
-                
-                value_offset = stream.tell()
-                
-                # Check if we have enough data
-                if value_offset + length > data_len:
-                    stream.seek(pos + 1)
-                    continue
-                
-                # Read the value portion
-                value = stream.read(length)
-                if len(value) < length:
-                    stream.seek(pos + 1)
-                    continue
-                    
-                # Parse the metadata
-                try:
-                    metadata = self._parse_metadata(value)
-                except:
-                    # If parsing fails, might be false positive
-                    stream.seek(pos + 1)
-                    continue
-                
-                return {
-                    'offset': pos,
-                    'key': chunk.hex(),
-                    'length': length,
-                    'value': value,
-                    'value_offset': value_offset,
-                    'metadata': metadata
-                }
-            else:
-                # Move back and try next byte
-                stream.seek(pos + 1)
-        
-        # Scanned max bytes without finding a packet
-        return None
                     
     def _read_ber_length(self, stream):
         """Read BER (Basic Encoding Rules) encoded length"""
@@ -344,347 +421,73 @@ class KLVParser:
                 'raw_hex': val_bytes.hex(),
                 'raw_decimal': raw_decimal
             }
+        
+        # Validate checksum if Tag 1 (Checksum) is present
+        if 1 in metadata:
+            checksum_valid = self._validate_checksum(value)
+            metadata[1]['checksum_valid'] = checksum_valid
             
         return metadata
+    
+    @staticmethod
+    def _validate_checksum(value):
+        """Validate MISB 0601 checksum (Tag 1).
+        
+        The running 16-bit sum of all bytes in the LDS value should be 0.
+        """
+        running_sum = 0
+        for byte in value:
+            running_sum = (running_sum + byte) & 0xFFFF
+        return running_sum == 0
+    
+    def _unpack_value(self, value, value_type):
+        """Unpack raw bytes to a numeric value with length validation."""
+        fmt_info = self._STRUCT_FORMATS.get(value_type)
+        if fmt_info is None:
+            return None
+        fmt, expected_len = fmt_info
+        if len(value) == expected_len:
+            return struct.unpack(fmt, value)[0]
+        # Handle variable-length IMAPB encoding gracefully
+        if len(value) > 0:
+            signed = value_type.startswith('int')
+            return int.from_bytes(value, byteorder='big', signed=signed)
+        return None
         
     def _decode_value(self, value, value_type, tag):
-        """Decode value based on its type with MISB ST 0601.19 conversions"""
+        """Decode value based on its type using data-driven conversion table."""
         try:
             if value_type == 'string':
                 return value.decode('utf-8', errors='ignore').strip()
-            elif value_type == 'nested':
+            if value_type == 'nested':
                 return f"Nested Set ({len(value)} bytes)"
             
-            # Extract raw integer value based on type
-            raw_val = None
-            if value_type == 'uint8':
-                raw_val = struct.unpack('>B', value)[0]
-            elif value_type == 'uint16':
-                raw_val = struct.unpack('>H', value)[0]
-            elif value_type == 'uint32':
-                raw_val = struct.unpack('>I', value)[0]
-            elif value_type == 'uint64':
-                raw_val = struct.unpack('>Q', value)[0]
-            elif value_type == 'int8':
-                raw_val = struct.unpack('>b', value)[0]
-            elif value_type == 'int16':
-                raw_val = struct.unpack('>h', value)[0]
-            elif value_type == 'int32':
-                raw_val = struct.unpack('>i', value)[0]
-            else:
+            raw_val = self._unpack_value(value, value_type)
+            if raw_val is None:
                 return value.hex()
             
-            # Apply MISB ST 0601.19 conversions based on tag number
-            if tag == 2:  # Precision Time Stamp (uint64 microseconds)
-                from datetime import datetime, timezone
-                timestamp_seconds = raw_val / 1_000_000.0
-                dt = datetime.fromtimestamp(timestamp_seconds, tz=timezone.utc)
-                return dt.strftime('%Y-%m-%d %H:%M:%S.%f UTC')[:-3]  # Trim to milliseconds
-            elif tag == 3:  # Mission ID
+            conv = self.TAG_CONVERSIONS.get(tag)
+            if conv is None:
                 return raw_val
-            elif tag == 4:  # Platform Tail Number
-                return raw_val
-            elif tag == 5:  # Platform Heading Angle (IMAPA uint16 -> degrees)
-                return f"{(raw_val / 65535.0) * 360.0:.4f}°"
-            elif tag == 6:  # Platform Pitch Angle (IMAPA int16 -> degrees ±20)
-                return f"{(raw_val / 32767.0) * 20.0:.4f}°"
-            elif tag == 7:  # Platform Roll Angle (IMAPA int16 -> degrees ±50)
-                return f"{(raw_val / 32767.0) * 50.0:.4f}°"
-            elif tag == 8:  # Platform True Airspeed (uint8 -> m/s)
-                return f"{raw_val} m/s"
-            elif tag == 9:  # Platform Indicated Airspeed (uint8 -> m/s)
-                return f"{raw_val} m/s"
-            elif tag == 10:  # Platform Designation
-                return raw_val
-            elif tag == 11:  # Image Source Sensor
-                return raw_val
-            elif tag == 12:  # Image Coordinate System
-                return raw_val
-            elif tag == 13:  # Sensor Latitude (IMAPA int32 -> degrees ±90)
-                return f"{(raw_val / 2147483648.0) * 90.0:.6f}°"
-            elif tag == 14:  # Sensor Longitude (IMAPA int32 -> degrees ±180)
-                return f"{(raw_val / 2147483648.0) * 180.0:.6f}°"
-            elif tag == 15:  # Sensor True Altitude (IMAPA uint16 -> meters -900 to 19000)
-                return f"{-900.0 + (raw_val / 65535.0) * 19900.0:.2f} m"
-            elif tag == 16:  # Sensor Horizontal FOV (IMAPA uint16 -> degrees 0-180)
-                return f"{(raw_val / 65535.0) * 180.0:.4f}°"
-            elif tag == 17:  # Sensor Vertical FOV (IMAPA uint16 -> degrees 0-180)
-                return f"{(raw_val / 65535.0) * 180.0:.4f}°"
-            elif tag == 18:  # Sensor Relative Azimuth (IMAPA uint32 -> degrees 0-360)
-                return f"{(raw_val / 4294967295.0) * 360.0:.4f}°"
-            elif tag == 19:  # Sensor Relative Elevation (IMAPA int32 -> degrees ±180)
-                return f"{(raw_val / 2147483647.0) * 180.0:.4f}°"
-            elif tag == 20:  # Sensor Relative Roll (IMAPA uint32 -> degrees 0-360)
-                return f"{(raw_val / 4294967295.0) * 360.0:.4f}°"
-            elif tag == 21:  # Slant Range (IMAPA uint32 -> meters 0-5000000)
-                return f"{(raw_val / 4294967295.0) * 5000000.0:.2f} m"
-            elif tag == 22:  # Target Width (IMAPA uint16 -> meters 0-10000)
-                return f"{(raw_val / 65535.0) * 10000.0:.2f} m"
-            elif tag == 23:  # Frame Center Latitude (IMAPA int32 -> degrees ±90)
-                return f"{(raw_val / 2147483648.0) * 90.0:.6f}°"
-            elif tag == 24:  # Frame Center Longitude (IMAPA int32 -> degrees ±180)
-                return f"{(raw_val / 2147483648.0) * 180.0:.6f}°"
-            elif tag == 25:  # Frame Center Elevation (IMAPA uint16 -> meters -900 to 19000)
-                return f"{-900.0 + (raw_val / 65535.0) * 19900.0:.2f} m"
-            elif tag == 26:  # Offset Corner Latitude Point 1 (IMAPA int16 -> degrees ±0.075)
-                return f"{(raw_val / 32767.0) * 0.075:.6f}°"
-            elif tag == 27:  # Offset Corner Longitude Point 1 (IMAPA int16 -> degrees ±0.075)
-                return f"{(raw_val / 32767.0) * 0.075:.6f}°"
-            elif tag == 28:  # Offset Corner Latitude Point 2
-                return f"{(raw_val / 32767.0) * 0.075:.6f}°"
-            elif tag == 29:  # Offset Corner Longitude Point 2
-                return f"{(raw_val / 32767.0) * 0.075:.6f}°"
-            elif tag == 30:  # Offset Corner Latitude Point 3
-                return f"{(raw_val / 32767.0) * 0.075:.6f}°"
-            elif tag == 31:  # Offset Corner Longitude Point 3
-                return f"{(raw_val / 32767.0) * 0.075:.6f}°"
-            elif tag == 32:  # Offset Corner Latitude Point 4
-                return f"{(raw_val / 32767.0) * 0.075:.6f}°"
-            elif tag == 33:  # Offset Corner Longitude Point 4
-                return f"{(raw_val / 32767.0) * 0.075:.6f}°"
-            elif tag == 34:  # Icing Detected (uint8)
-                return "Detected" if raw_val == 1 else "Not Detected"
-            elif tag == 35:  # Wind Direction (IMAPA uint16 -> degrees 0-360)
-                return f"{(raw_val / 65535.0) * 360.0:.2f}°"
-            elif tag == 36:  # Wind Speed (IMAPA uint8 -> m/s 0-100)
-                return f"{(raw_val / 255.0) * 100.0:.2f} m/s"
-            elif tag == 37:  # Static Pressure (IMAPA uint16 -> mbar 0-5000)
-                return f"{(raw_val / 65535.0) * 5000.0:.2f} mbar"
-            elif tag == 38:  # Density Altitude (IMAPA uint16 -> meters -900 to 19000)
-                return f"{-900.0 + (raw_val / 65535.0) * 19900.0:.2f} m"
-            elif tag == 39:  # Outside Air Temperature (int8 -> Celsius)
-                return f"{raw_val}°C"
-            elif tag == 40:  # Target Location Latitude (IMAPA int32 -> degrees ±90)
-                return f"{(raw_val / 2147483648.0) * 90.0:.6f}°"
-            elif tag == 41:  # Target Location Longitude (IMAPA int32 -> degrees ±180)
-                return f"{(raw_val / 2147483648.0) * 180.0:.6f}°"
-            elif tag == 42:  # Target Location Elevation (IMAPA uint16 -> meters -900 to 19000)
-                return f"{-900.0 + (raw_val / 65535.0) * 19900.0:.2f} m"
-            elif tag == 43:  # Target Track Gate Width (uint8 -> pixels 1-255)
-                return f"{raw_val} pixels"
-            elif tag == 44:  # Target Track Gate Height (uint8 -> pixels 1-255)
-                return f"{raw_val} pixels"
-            elif tag == 45:  # Target Error Estimate - CE90 (IMAPA uint16 -> meters 0-4095)
-                return f"{(raw_val / 65535.0) * 4095.0:.2f} m"
-            elif tag == 46:  # Target Error Estimate - LE90 (IMAPA uint16 -> meters 0-4095)
-                return f"{(raw_val / 65535.0) * 4095.0:.2f} m"
-            elif tag == 47:  # Generic Flag Data 01 (uint8 bitfield)
+            
+            method = conv[0]
+            if method == "map":
+                _, offset, divisor, scale, unit, decimals = conv
+                result = offset + (raw_val / divisor) * scale
+                return f"{result:.{decimals}f}{unit}"
+            elif method == "direct":
+                return f"{raw_val}{conv[1]}"
+            elif method == "timestamp":
+                ts = raw_val / 1_000_000.0
+                dt = datetime.fromtimestamp(ts, tz=timezone.utc)
+                return dt.strftime('%Y-%m-%d %H:%M:%S.%f UTC')[:-3]
+            elif method == "hex":
                 return f"0x{raw_val:02X}"
-            elif tag == 48:  # Security Local Metadata Set
-                return raw_val
-            elif tag == 49:  # Differential Pressure (IMAPA uint16 -> mbar 0-5000)
-                return f"{(raw_val / 65535.0) * 5000.0:.2f} mbar"
-            elif tag == 50:  # Platform Angle of Attack (IMAPA int16 -> degrees ±20)
-                return f"{(raw_val / 32767.0) * 20.0:.4f}°"
-            elif tag == 51:  # Platform Vertical Speed (IMAPA int16 -> m/s ±180)
-                return f"{(raw_val / 32767.0) * 180.0:.2f} m/s"
-            elif tag == 52:  # Platform Sideslip Angle (IMAPA int16 -> degrees ±20)
-                return f"{(raw_val / 32767.0) * 20.0:.4f}°"
-            elif tag == 53:  # Airfield Barometric Pressure (IMAPA uint16 -> mbar 0-5000)
-                return f"{(raw_val / 65535.0) * 5000.0:.2f} mbar"
-            elif tag == 54:  # Airfield Elevation (IMAPA uint16 -> meters -900 to 19000)
-                return f"{-900.0 + (raw_val / 65535.0) * 19900.0:.2f} m"
-            elif tag == 55:  # Relative Humidity (IMAPA uint8 -> % 0-100)
-                return f"{(raw_val / 255.0) * 100.0:.1f}%"
-            elif tag == 56:  # Platform Ground Speed (IMAPA uint8 -> m/s 0-255)
-                return f"{raw_val} m/s"
-            elif tag == 57:  # Ground Range (IMAPA uint32 -> meters 0-5000000)
-                return f"{(raw_val / 4294967295.0) * 5000000.0:.2f} m"
-            elif tag == 58:  # Platform Fuel Remaining (IMAPA uint16 -> kg 0-10000)
-                return f"{(raw_val / 65535.0) * 10000.0:.2f} kg"
-            elif tag == 59:  # Platform Call Sign
-                return raw_val
-            elif tag == 60:  # Weapon Load (uint16)
-                return raw_val
-            elif tag == 61:  # Weapon Fired (uint8)
-                return raw_val
-            elif tag == 62:  # Laser PRF Code (uint16)
-                return raw_val
-            elif tag == 63:  # Sensor FOV Name (uint8)
-                return raw_val
-            elif tag == 64:  # Platform Magnetic Heading (IMAPA uint16 -> degrees 0-360)
-                return f"{(raw_val / 65535.0) * 360.0:.4f}°"
-            elif tag == 65:  # UAS Datalink LS Version Number (uint8)
-                return raw_val
-            elif tag == 66:  # Deprecated
-                return f"Deprecated ({raw_val})"
-            elif tag == 67:  # Alternate Platform Latitude (IMAPA int32 -> degrees ±90)
-                return f"{(raw_val / 2147483648.0) * 90.0:.6f}°"
-            elif tag == 68:  # Alternate Platform Longitude (IMAPA int32 -> degrees ±180)
-                return f"{(raw_val / 2147483648.0) * 180.0:.6f}°"
-            elif tag == 69:  # Alternate Platform Altitude (IMAPA uint16 -> meters -900 to 19000)
-                return f"{-900.0 + (raw_val / 65535.0) * 19900.0:.2f} m"
-            elif tag == 70:  # Alternate Platform Name
-                return raw_val
-            elif tag == 71:  # Alternate Platform Heading (IMAPA uint16 -> degrees 0-360)
-                return f"{(raw_val / 65535.0) * 360.0:.4f}°"
-            elif tag == 72:  # Event Start Time (uint64 microseconds)
-                from datetime import datetime, timezone
-                timestamp_seconds = raw_val / 1_000_000.0
-                dt = datetime.fromtimestamp(timestamp_seconds, tz=timezone.utc)
-                return dt.strftime('%Y-%m-%d %H:%M:%S.%f UTC')[:-3]  # Trim to milliseconds
-            elif tag == 73:  # RVT Local Data Set
-                return raw_val
-            elif tag == 74:  # VMTI Local Data Set
-                return raw_val
-            elif tag == 75:  # Sensor Ellipsoid Height (IMAPA uint16 -> meters -900 to 19000)
-                return f"{-900.0 + (raw_val / 65535.0) * 19900.0:.2f} m"
-            elif tag == 76:  # Alternate Platform Ellipsoid Height (IMAPA uint16 -> meters -900 to 19000)
-                return f"{-900.0 + (raw_val / 65535.0) * 19900.0:.2f} m"
-            elif tag == 77:  # Operational Mode (uint8)
-                return raw_val
-            elif tag == 78:  # Frame Center Height Above Ellipsoid (IMAPA uint16 -> meters -900 to 19000)
-                return f"{-900.0 + (raw_val / 65535.0) * 19900.0:.2f} m"
-            elif tag == 79:  # Sensor North Velocity (IMAPA int16 -> m/s ±327)
-                return f"{(raw_val / 32767.0) * 327.0:.2f} m/s"
-            elif tag == 80:  # Sensor East Velocity (IMAPA int16 -> m/s ±327)
-                return f"{(raw_val / 32767.0) * 327.0:.2f} m/s"
-            elif tag == 81:  # Image Horizon Pixel Pack
-                return raw_val
-            elif tag == 82:  # Corner Latitude Point 1 (IMAPA int32 -> degrees ±90)
-                return f"{(raw_val / 2147483648.0) * 90.0:.6f}°"
-            elif tag == 83:  # Corner Longitude Point 1 (IMAPA int32 -> degrees ±180)
-                return f"{(raw_val / 2147483648.0) * 180.0:.6f}°"
-            elif tag == 84:  # Corner Latitude Point 2
-                return f"{(raw_val / 2147483648.0) * 90.0:.6f}°"
-            elif tag == 85:  # Corner Longitude Point 2
-                return f"{(raw_val / 2147483648.0) * 180.0:.6f}°"
-            elif tag == 86:  # Corner Latitude Point 3
-                return f"{(raw_val / 2147483648.0) * 90.0:.6f}°"
-            elif tag == 87:  # Corner Longitude Point 3
-                return f"{(raw_val / 2147483648.0) * 180.0:.6f}°"
-            elif tag == 88:  # Corner Latitude Point 4
-                return f"{(raw_val / 2147483648.0) * 90.0:.6f}°"
-            elif tag == 89:  # Corner Longitude Point 4
-                return f"{(raw_val / 2147483648.0) * 180.0:.6f}°"
-            elif tag == 90:  # Platform Pitch Angle Full (IMAPA int32 -> degrees ±90)
-                return f"{(raw_val / 2147483647.0) * 90.0:.6f}°"
-            elif tag == 91:  # Platform Roll Angle Full (IMAPA int32 -> degrees ±90)
-                return f"{(raw_val / 2147483647.0) * 90.0:.6f}°"
-            elif tag == 92:  # Platform Angle of Attack Full (IMAPA int32 -> degrees ±90)
-                return f"{(raw_val / 2147483647.0) * 90.0:.6f}°"
-            elif tag == 93:  # Platform Sideslip Angle Full (IMAPA int32 -> degrees ±90)
-                return f"{(raw_val / 2147483647.0) * 90.0:.6f}°"
-            elif tag == 94:  # MIIS Core Identifier
-                return raw_val
-            elif tag == 95:  # SAR Motion Imagery Local Set
-                return raw_val
-            elif tag == 96:  # Target Width Extended (IMAPA uint32 -> meters 0-10000000)
-                return f"{(raw_val / 4294967295.0) * 10000000.0:.2f} m"
-            elif tag == 97:  # Range Image Local Set
-                return raw_val
-            elif tag == 98:  # Geo-Registration Local Set
-                return raw_val
-            elif tag == 99:  # Composite Imaging Local Set
-                return raw_val
-            elif tag == 100:  # Segment Local Set
-                return raw_val
-            elif tag == 101:  # Amend Local Set
-                return raw_val
-            elif tag == 102:  # SDCC-FLP
-                return raw_val
-            elif tag == 103:  # Density Altitude Extended (IMAPA int32 -> meters -900 to 40000)
-                return f"{-900.0 + ((raw_val + 2147483648) / 4294967295.0) * 40900.0:.2f} m"
-            elif tag == 104:  # Sensor Ellipsoid Height Extended (IMAPA int32 -> meters -900 to 40000)
-                return f"{-900.0 + ((raw_val + 2147483648) / 4294967295.0) * 40900.0:.2f} m"
-            elif tag == 105:  # Alternate Platform Ellipsoid Height Extended (IMAPA int32 -> meters -900 to 40000)
-                return f"{-900.0 + ((raw_val + 2147483648) / 4294967295.0) * 40900.0:.2f} m"
-            elif tag == 106:  # Stream Designator
-                return raw_val
-            elif tag == 107:  # Operational Base
-                return raw_val
-            elif tag == 108:  # Broadcast Source
-                return raw_val
-            elif tag == 109:  # Range to Recovery Location (IMAPA uint32 -> meters 0-21000)
-                return f"{(raw_val / 4294967295.0) * 21000.0:.2f} m"
-            elif tag == 110:  # Time Airborne (uint32 seconds)
-                return f"{raw_val} s"
-            elif tag == 111:  # Propulsion Unit Speed (uint32 RPM)
-                return f"{raw_val} RPM"
-            elif tag == 112:  # Platform Course Angle (IMAPA uint32 -> degrees 0-360)
-                return f"{(raw_val / 4294967295.0) * 360.0:.4f}°"
-            elif tag == 113:  # Altitude AGL (IMAPA uint16 -> meters -900 to 19000)
-                return f"{-900.0 + (raw_val / 65535.0) * 19900.0:.2f} m"
-            elif tag == 114:  # Radar Altimeter (IMAPA uint32 -> meters 0-50000)
-                return f"{(raw_val / 4294967295.0) * 50000.0:.2f} m"
-            elif tag == 115:  # Control Command
-                return raw_val
-            elif tag == 116:  # Control Command Verification List
-                return raw_val
-            elif tag == 117:  # Sensor Azimuth Rate (IMAPA int32 -> degrees/s ±1000)
-                return f"{(raw_val / 2147483647.0) * 1000.0:.4f}°/s"
-            elif tag == 118:  # Sensor Elevation Rate (IMAPA int32 -> degrees/s ±1000)
-                return f"{(raw_val / 2147483647.0) * 1000.0:.4f}°/s"
-            elif tag == 119:  # Sensor Roll Rate (IMAPA int32 -> degrees/s ±1000)
-                return f"{(raw_val / 2147483647.0) * 1000.0:.4f}°/s"
-            elif tag == 120:  # On-board MI Storage Capacity (uint32 MB)
-                return f"{raw_val} MB"
-            elif tag == 121:  # Zoom Percentage (IMAPA uint8 -> % 0-100)
-                return f"{(raw_val / 255.0) * 100.0:.1f}%"
-            elif tag == 122:  # Communications Method
-                return raw_val
-            elif tag == 123:  # Leap Seconds (int8 seconds)
-                return f"{raw_val} s"
-            elif tag == 124:  # Correction Offset (int64 nanoseconds)
-                return f"{raw_val} ns"
-            elif tag == 125:  # Payload List
-                return raw_val
-            elif tag == 126:  # Active Payloads
-                return raw_val
-            elif tag == 127:  # Weapons Stores
-                return raw_val
-            elif tag == 128:  # Waypoint List
-                return raw_val
-            elif tag == 129:  # View Domain
-                return raw_val
-            elif tag == 130:  # Metadata Substream ID
-                return raw_val
-            elif tag == 131:  # GTIN-16
-                return raw_val
-            elif tag == 132:  # GTIN-24
-                return raw_val
-            elif tag == 133:  # Payload Recording Status
-                return raw_val
-            elif tag == 134:  # Payload Playback Status
-                return raw_val
-            elif tag == 135:  # Payload Data File Link
-                return raw_val
-            elif tag == 136:  # Metadata Compression Method
-                return raw_val
-            elif tag == 137:  # Metadata Compression Ratio
-                return f"{(raw_val / 255.0) * 100.0:.1f}%" if value_type == 'uint8' else raw_val
-            elif tag == 138:  # Session Start Time (uint64 microseconds)
-                from datetime import datetime, timezone
-                timestamp_seconds = raw_val / 1_000_000.0
-                dt = datetime.fromtimestamp(timestamp_seconds, tz=timezone.utc)
-                return dt.strftime('%Y-%m-%d %H:%M:%S.%f UTC')[:-3]  # Trim to milliseconds
-            elif tag == 139:  # Session End Time (uint64 microseconds)
-                from datetime import datetime, timezone
-                timestamp_seconds = raw_val / 1_000_000.0
-                dt = datetime.fromtimestamp(timestamp_seconds, tz=timezone.utc)
-                return dt.strftime('%Y-%m-%d %H:%M:%S.%f UTC')[:-3]  # Trim to milliseconds
-            elif tag == 140:  # Sensor Frame Rate Pack
-                return raw_val
-            elif tag == 141:  # Wavelengths List
-                return raw_val
-            elif tag == 142:  # Country Codes
-                return raw_val
-            elif tag == 143:  # Number of NAVSATs in View (uint8)
-                return raw_val
-            elif tag == 144:  # Positioning Method Source
-                return raw_val
-            elif tag == 145:  # Platform Status
-                return raw_val
-            elif tag == 146:  # Sensor Control Mode
-                return raw_val
-            elif tag == 147:  # Sensor Frame Rate Pack
-                return raw_val
-            elif tag == 148:  # Wavelengths List
-                return raw_val
-            else:
-                # Default: return raw value
-                return raw_val
-        except:
+            elif method == "enum":
+                return conv[1].get(raw_val, str(raw_val))
+            
+            return raw_val
+        except Exception:
             return value.hex()
             
     def export(self, packets, file_path, format_type):
@@ -711,7 +514,7 @@ class KLVParser:
                             meta.get('name', ''),
                             meta.get('type', ''),
                             meta.get('value', ''),
-                            meta.get('raw', '')
+                            meta.get('raw_hex', '')
                         ])
                         
     def _export_xml(self, packets, file_path):
@@ -735,7 +538,7 @@ class KLVParser:
                     value_elem.text = str(meta.get('value', ''))
                     
                     raw_elem = ET.SubElement(meta_elem, 'Raw')
-                    raw_elem.text = meta.get('raw', '')
+                    raw_elem.text = meta.get('raw_hex', '')
                     
         # Pretty print
         xml_str = minidom.parseString(ET.tostring(root)).toprettyxml(indent="  ")

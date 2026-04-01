@@ -3,121 +3,152 @@ Statistics Panel
 Displays statistical information about parsed KLV packets
 """
 
-from PyQt5.QtWidgets import (QWidget, QVBoxLayout, QGridLayout, QLabel, 
-                             QGroupBox, QTableWidget, QTableWidgetItem)
-from PyQt5.QtCore import Qt
-from PyQt5.QtGui import QFont
+import tkinter as tk
+from tkinter import ttk
 from collections import Counter
 
+# Colour palette shared with the main window
+BG       = '#2b2b2b'
+BG_DARK  = '#1e1e1e'
+FG       = '#d4d4d4'
+FG_TEAL  = '#4ec9b0'
+BLUE     = '#0d3a5c'
+BLUE_ALT = '#094771'
+BORDER   = '#3c3c3c'
 
-class StatisticsPanel(QWidget):
+
+class StatisticsPanel(ttk.Frame):
     """Panel for displaying KLV packet statistics"""
-    
-    def __init__(self):
-        super().__init__()
-        self.init_ui()
-        
-    def init_ui(self):
-        """Initialize the statistics panel UI"""
-        layout = QVBoxLayout(self)
-        
-        # Summary statistics group
-        summary_group = QGroupBox("Summary Statistics")
-        summary_layout = QGridLayout()
-        
-        # Create labels for statistics
-        self.total_packets_label = self._create_stat_label("0")
-        self.total_size_label = self._create_stat_label("0 bytes")
-        self.avg_packet_size_label = self._create_stat_label("0 bytes")
-        self.unique_tags_label = self._create_stat_label("0")
-        
-        summary_layout.addWidget(QLabel("Total Packets:"), 0, 0)
-        summary_layout.addWidget(self.total_packets_label, 0, 1)
-        
-        summary_layout.addWidget(QLabel("Total Size:"), 1, 0)
-        summary_layout.addWidget(self.total_size_label, 1, 1)
-        
-        summary_layout.addWidget(QLabel("Average Packet Size:"), 2, 0)
-        summary_layout.addWidget(self.avg_packet_size_label, 2, 1)
-        
-        summary_layout.addWidget(QLabel("Unique Metadata Tags:"), 3, 0)
-        summary_layout.addWidget(self.unique_tags_label, 3, 1)
-        
-        summary_group.setLayout(summary_layout)
-        layout.addWidget(summary_group)
-        
-        # Tag frequency table
-        tag_group = QGroupBox("Metadata Tag Frequency")
-        tag_layout = QVBoxLayout()
-        
-        self.tag_table = QTableWidget()
-        self.tag_table.setColumnCount(3)
-        self.tag_table.setHorizontalHeaderLabels(['Tag ID', 'Name', 'Count'])
-        self.tag_table.setAlternatingRowColors(True)
-        
-        tag_layout.addWidget(self.tag_table)
-        tag_group.setLayout(tag_layout)
-        layout.addWidget(tag_group)
-        
-        # Stretch to fill
-        layout.addStretch()
-        
-    def _create_stat_label(self, text):
-        """Create a styled label for statistics"""
-        label = QLabel(text)
-        font = QFont()
-        font.setBold(True)
-        font.setPointSize(11)
-        label.setFont(font)
-        label.setStyleSheet("color: #4ec9b0;")
-        return label
-        
+
+    def __init__(self, parent, **kwargs):
+        super().__init__(parent, **kwargs)
+        self.configure(style='Dark.TFrame')
+        self._build_styles()
+        self._init_ui()
+
+    # ------------------------------------------------------------------
+    # Style helpers
+    # ------------------------------------------------------------------
+
+    def _build_styles(self):
+        s = ttk.Style(self)
+        s.configure('Dark.TFrame',        background=BG)
+        s.configure('Group.TLabelframe',  background=BG, foreground='#ffffff',
+                    bordercolor=BORDER, relief='groove')
+        s.configure('Group.TLabelframe.Label', background=BG, foreground='#ffffff',
+                    font=('Segoe UI', 9, 'bold'))
+        s.configure('Stats.TLabel',  background=BG, foreground=FG)
+        s.configure('Value.TLabel',  background=BG, foreground=FG_TEAL,
+                    font=('Segoe UI', 11, 'bold'))
+        s.configure('Tag.Treeview',
+                    background=BLUE, fieldbackground=BLUE,
+                    foreground=FG, rowheight=22,
+                    bordercolor=BORDER, relief='flat')
+        s.configure('Tag.Treeview.Heading',
+                    background=BG_DARK, foreground=FG,
+                    bordercolor=BORDER, relief='flat')
+        s.map('Tag.Treeview',
+              background=[('selected', '#007acc')],
+              foreground=[('selected', '#ffffff')])
+
+    # ------------------------------------------------------------------
+    # Layout
+    # ------------------------------------------------------------------
+
+    def _init_ui(self):
+        self.columnconfigure(0, weight=1)
+        self.rowconfigure(1, weight=1)
+
+        # --- Summary group -------------------------------------------
+        summary_frame = ttk.LabelFrame(self, text='Summary Statistics',
+                                       style='Group.TLabelframe', padding=10)
+        summary_frame.grid(row=0, column=0, sticky='ew', padx=8, pady=(8, 4))
+        summary_frame.columnconfigure(1, weight=1)
+
+        rows = [
+            ('Total Packets:',       'total_packets'),
+            ('Total Size:',          'total_size'),
+            ('Average Packet Size:', 'avg_packet_size'),
+            ('Unique Metadata Tags:','unique_tags'),
+        ]
+        self._stat_vars = {}
+        for r, (caption, key) in enumerate(rows):
+            ttk.Label(summary_frame, text=caption, style='Stats.TLabel').grid(
+                row=r, column=0, sticky='w', padx=(0, 16), pady=2)
+            var = tk.StringVar(value='0')
+            self._stat_vars[key] = var
+            ttk.Label(summary_frame, textvariable=var, style='Value.TLabel').grid(
+                row=r, column=1, sticky='w', pady=2)
+
+        # --- Tag frequency group -------------------------------------
+        tag_frame = ttk.LabelFrame(self, text='Metadata Tag Frequency',
+                                   style='Group.TLabelframe', padding=(8, 4))
+        tag_frame.grid(row=1, column=0, sticky='nsew', padx=8, pady=(4, 8))
+        tag_frame.columnconfigure(0, weight=1)
+        tag_frame.rowconfigure(0, weight=1)
+
+        cols = ('Tag ID', 'Name', 'Count')
+        self.tag_table = ttk.Treeview(tag_frame, columns=cols, show='headings',
+                                      style='Tag.Treeview')
+        for col in cols:
+            self.tag_table.heading(col, text=col)
+        self.tag_table.column('Tag ID', width=60,  anchor='center', stretch=False)
+        self.tag_table.column('Name',   width=280, anchor='w')
+        self.tag_table.column('Count',  width=60,  anchor='center', stretch=False)
+        self.tag_table.grid(row=0, column=0, sticky='nsew')
+
+        # Alternating row colours
+        self.tag_table.tag_configure('odd',  background=BLUE)
+        self.tag_table.tag_configure('even', background=BLUE_ALT)
+
+        vsb = ttk.Scrollbar(tag_frame, orient='vertical',
+                            command=self.tag_table.yview)
+        self.tag_table.configure(yscrollcommand=vsb.set)
+        vsb.grid(row=0, column=1, sticky='ns')
+
+    # ------------------------------------------------------------------
+    # Public API (mirrors the PyQt5 version)
+    # ------------------------------------------------------------------
+
     def update_statistics(self, packets):
-        """Update statistics based on parsed packets"""
+        """Update statistics based on parsed packets."""
         if not packets:
             self.clear()
             return
-            
-        # Calculate summary statistics
+
         total_packets = len(packets)
-        total_size = sum(p.get('length', 0) for p in packets)
-        avg_size = total_size // total_packets if total_packets > 0 else 0
-        
-        # Count unique tags
-        all_tags = []
+        total_size    = sum(p.get('length', 0) for p in packets)
+        avg_size      = total_size // total_packets if total_packets else 0
+
+        all_tags  = []
         tag_names = {}
         for packet in packets:
-            if 'metadata' in packet:
-                for tag, meta in packet['metadata'].items():
-                    all_tags.append(tag)
-                    if tag not in tag_names:
-                        tag_names[tag] = meta.get('name', f'Tag {tag}')
-                        
+            for tag, meta in packet.get('metadata', {}).items():
+                all_tags.append(tag)
+                if tag not in tag_names:
+                    tag_names[tag] = meta.get('name', f'Tag {tag}')
+
         unique_tags = len(set(all_tags))
-        tag_counts = Counter(all_tags)
-        
-        # Update labels
-        self.total_packets_label.setText(str(total_packets))
-        self.total_size_label.setText(f"{total_size:,} bytes")
-        self.avg_packet_size_label.setText(f"{avg_size:,} bytes")
-        self.unique_tags_label.setText(str(unique_tags))
-        
-        # Update tag frequency table
-        self.tag_table.setRowCount(0)
-        for tag, count in tag_counts.most_common():
-            row = self.tag_table.rowCount()
-            self.tag_table.insertRow(row)
-            
-            self.tag_table.setItem(row, 0, QTableWidgetItem(str(tag)))
-            self.tag_table.setItem(row, 1, QTableWidgetItem(tag_names.get(tag, f'Tag {tag}')))
-            self.tag_table.setItem(row, 2, QTableWidgetItem(str(count)))
-            
-        self.tag_table.resizeColumnsToContents()
-        
+        tag_counts  = Counter(all_tags)
+
+        self._stat_vars['total_packets'].set(str(total_packets))
+        self._stat_vars['total_size'].set(f'{total_size:,} bytes')
+        self._stat_vars['avg_packet_size'].set(f'{avg_size:,} bytes')
+        self._stat_vars['unique_tags'].set(str(unique_tags))
+
+        # Rebuild tag table
+        self.tag_table.delete(*self.tag_table.get_children())
+        for i, (tag, count) in enumerate(tag_counts.most_common()):
+            row_tag = 'even' if i % 2 == 0 else 'odd'
+            self.tag_table.insert('', 'end',
+                                  values=(str(tag), tag_names.get(tag, f'Tag {tag}'), str(count)),
+                                  tags=(row_tag,))
+
     def clear(self):
-        """Clear all statistics"""
-        self.total_packets_label.setText("0")
-        self.total_size_label.setText("0 bytes")
-        self.avg_packet_size_label.setText("0 bytes")
-        self.unique_tags_label.setText("0")
-        self.tag_table.setRowCount(0)
+        """Reset all statistics to zero."""
+        self._stat_vars['total_packets'].set('0')
+        self._stat_vars['total_size'].set('0 bytes')
+        self._stat_vars['avg_packet_size'].set('0 bytes')
+        self._stat_vars['unique_tags'].set('0')
+        self.tag_table.delete(*self.tag_table.get_children())
+
